@@ -1,0 +1,21 @@
+[submodule "openmp-sdk"]
+	path = third_party/open.mp-sdk
+	url = https://github.com/openmultiplayer/open.mp-sdk.git
+[submodule "samp-sdk"]
+	path = third_party/samp-plugin-sdk
+	url = https://github.com/maddinat0r/samp-plugin-sdk.git
+[submodule "mariadb-connector-c"]
+	path = third_party/mariadb-connector-c
+	url = https://github.com/mariadb-corporation/mariadb-connector-c.git
+[submodule "openssl"]
+	path = third_party/openssl
+	url = https://github.com/openssl/openssl.git
+[submodule "argon2"]
+	path = third_party/argon2
+	url = https://github.com/P-H-C/phc-winner-argon2.git
+[submodule "nlohmann-json"]
+	path = third_party/json
+	url = https://github.com/nlohmann/json.git
+[submodule "curl"]
+	path = third_party/curl
+	url = https://github.com/curl/curl.git
