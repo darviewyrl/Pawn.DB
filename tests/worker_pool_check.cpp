@@ -7,6 +7,20 @@
 #include <vector>
 
 int main() {
+  {
+    pawndb::WorkerPool pool(1);
+    std::atomic<bool> scheduled{false}, immediate{false};
+    if (!pool.schedule(0, std::chrono::milliseconds(150), [&] { scheduled = true; }) ||
+        !pool.submit(0, pawndb::WorkerPool::Priority::normal, [&] { immediate = true; })) return 1;
+    const auto immediate_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    while (!immediate && std::chrono::steady_clock::now() < immediate_deadline)
+      std::this_thread::yield();
+    if (!immediate || scheduled) return 1;
+    const auto timer_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!scheduled && std::chrono::steady_clock::now() < timer_deadline)
+      std::this_thread::yield();
+    if (!scheduled) return 1;
+  }
   std::array<int, 3> order{};
   int completed = 0;
   {

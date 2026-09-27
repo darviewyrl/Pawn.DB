@@ -7,6 +7,11 @@
 #include <thread>
 
 int main() {
+  if (pawndb::next_reconnect_delay(std::chrono::seconds(1)) != std::chrono::seconds(2) ||
+      pawndb::next_reconnect_delay(std::chrono::seconds(2)) != std::chrono::seconds(4) ||
+      pawndb::next_reconnect_delay(std::chrono::seconds(4)) != std::chrono::seconds(8) ||
+      pawndb::next_reconnect_delay(std::chrono::seconds(8)) != std::chrono::seconds(15) ||
+      pawndb::next_reconnect_delay(std::chrono::seconds(15)) != std::chrono::seconds(15)) return 1;
   pawndb::Lifecycle life;
   life.start();
   int script = 0, other = 0;
@@ -140,6 +145,70 @@ int main() {
           !captured[1].ssl_enabled || captured[1].ca_cert != "ca.pem" ||
           captured[2].charset != "utf8mb4" || captured[3].ssl_enabled ||
           captured[3].backend != pawndb::Backend::mariadb) return 1;
+    }
+  }
+  {
+    auto online = std::make_shared<std::atomic<bool>>(true);
+    std::atomic<int> queries{0};
+    std::vector<std::string> statements;
+    std::mutex statements_mutex;
+    struct NetworkPool final : pawndb::SessionPool {
+      std::shared_ptr<std::atomic<bool>> online;
+      std::atomic<int>& queries;
+      std::vector<std::string>& statements;
+      std::mutex& statements_mutex;
+      NetworkPool(std::shared_ptr<std::atomic<bool>> state, std::atomic<int>& count,
+                  std::vector<std::string>& sql, std::mutex& sql_mutex)
+          : online(std::move(state)), queries(count), statements(sql),
+            statements_mutex(sql_mutex) {}
+      bool query(std::string_view sql, pawndb::DriverError& error) override {
+        if (!online->load()) { error = {-4, "offline"}; return false; }
+        ++queries;
+        { std::lock_guard lock(statements_mutex); statements.emplace_back(sql); }
+        return true;
+      }
+      bool ping(pawndb::DriverError& error) override {
+        if (online->load()) return true;
+        error = {-4, "offline"};
+        return false;
+      }
+    };
+    pawndb::ConnectionManager reconnecting(life,
+        [](void*, auto, int, std::string) {}, [](std::string) {},
+        [online, &queries, &statements, &statements_mutex](
+            const pawndb::ConnectionConfig&, pawndb::DriverError& error)
+            -> std::shared_ptr<pawndb::SessionPool> {
+          if (!online->load()) { error = {-4, "offline"}; return {}; }
+          return std::make_shared<NetworkPool>(online, queries, statements, statements_mutex);
+        });
+    const auto recovered = reconnecting.connect(&script, direct);
+    const auto connected_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!reconnecting.is_connected(recovered) &&
+           std::chrono::steady_clock::now() < connected_deadline) std::this_thread::yield();
+    if (!reconnecting.is_connected(recovered)) return 1;
+    online->store(false);
+    const auto disconnected_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (reconnecting.is_connected(recovered) &&
+           std::chrono::steady_clock::now() < disconnected_deadline) std::this_thread::yield();
+    if (reconnecting.is_connected(recovered)) return 1;
+    if (!reconnecting.query(recovered, "SELECT retained")) return 1;
+    std::atomic<bool> query_done{false}, query_ok{false};
+    if (!reconnecting.query(recovered, "SELECT retained callback", [&](bool ok, auto) {
+          query_ok = ok;
+          query_done = true;
+        })) return 1;
+    online->store(true);
+    const auto recovery_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!query_done && std::chrono::steady_clock::now() < recovery_deadline) {
+      life.dispatch_tick();
+      std::this_thread::yield();
+    }
+    if (!query_done || !query_ok || !reconnecting.is_connected(recovered) || queries != 2 ||
+        !reconnecting.close(recovered)) return 1;
+    {
+      std::lock_guard lock(statements_mutex);
+      if (statements != std::vector<std::string>{"SELECT retained", "SELECT retained callback"})
+        return 1;
     }
   }
   life.stop();

@@ -18,6 +18,7 @@ class SessionPool {
  public:
   virtual ~SessionPool() = default;
   virtual bool query(std::string_view sql, DriverError& error) = 0;
+  virtual bool ping(DriverError& error) { return query("SELECT 1", error); }
 };
 
 using SessionFactory = std::function<std::shared_ptr<SessionPool>(

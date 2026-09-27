@@ -3,9 +3,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -93,6 +97,7 @@ class WorkerPool {
     for (std::size_t i = 0; i < count; ++i) workers_.push_back(std::make_unique<Worker>());
     try {
       for (auto& worker : workers_) threads_.emplace_back([this, p = worker.get()] { run(*p); });
+      timer_ = std::thread([this] { run_timers(); });
     } catch (...) {
       stop();
       throw;
@@ -116,6 +121,18 @@ class WorkerPool {
     return true;
   }
 
+  bool schedule(std::size_t index, std::chrono::steady_clock::duration delay, Work work) {
+    if (stopping_.load(std::memory_order_acquire) || index >= workers_.size() || !work)
+      return false;
+    {
+      std::lock_guard lock(timer_mutex_);
+      if (stopping_.load(std::memory_order_acquire)) return false;
+      timers_.emplace(std::chrono::steady_clock::now() + delay, Timer{index, std::move(work)});
+    }
+    timer_ready_.notify_one();
+    return true;
+  }
+
   void defer_cleanup(std::size_t index, Work work) {
     auto& worker = *workers_[index];
     worker.cleanup.push(std::move(work));
@@ -130,6 +147,8 @@ class WorkerPool {
 
   void stop() {
     if (stopping_.exchange(true, std::memory_order_acq_rel)) return;
+    timer_ready_.notify_one();
+    if (timer_.joinable()) timer_.join();
     for (auto& worker : workers_) {
       worker->wake.fetch_add(1, std::memory_order_release);
       worker->wake.notify_one();
@@ -142,6 +161,7 @@ class WorkerPool {
     SpscQueue<> high;
     SpscQueue<> normal;
     MpscQueue cleanup;
+    MpscQueue delayed;
     std::atomic<unsigned> wake{0};
   };
 
@@ -149,6 +169,7 @@ class WorkerPool {
     for (;;) {
       const auto wake = worker.wake.load(std::memory_order_acquire);
       if (auto work = worker.high.pop()) { work(); continue; }
+      if (auto work = worker.delayed.pop()) { work(); continue; }
       if (auto work = worker.normal.pop()) { work(); continue; }
       if (auto work = worker.cleanup.pop()) { work(); continue; }
       if (stopping_.load(std::memory_order_acquire)) break;
@@ -156,8 +177,40 @@ class WorkerPool {
     }
   }
 
+  struct Timer {
+    std::size_t worker;
+    Work work;
+  };
+
+  void run_timers() {
+    std::unique_lock lock(timer_mutex_);
+    while (!stopping_.load(std::memory_order_acquire)) {
+      if (timers_.empty()) {
+        timer_ready_.wait(lock, [this] {
+          return stopping_.load(std::memory_order_acquire) || !timers_.empty();
+        });
+        continue;
+      }
+      const auto due = timers_.begin()->first;
+      if (timer_ready_.wait_until(lock, due) != std::cv_status::timeout) continue;
+      const auto now = std::chrono::steady_clock::now();
+      while (!timers_.empty() && timers_.begin()->first <= now) {
+        auto timer = std::move(timers_.begin()->second);
+        timers_.erase(timers_.begin());
+        auto& worker = *workers_[timer.worker];
+        worker.delayed.push(std::move(timer.work));
+        worker.wake.fetch_add(1, std::memory_order_release);
+        worker.wake.notify_one();
+      }
+    }
+  }
+
   std::vector<std::unique_ptr<Worker>> workers_;
   std::vector<std::thread> threads_;
+  std::thread timer_;
+  std::mutex timer_mutex_;
+  std::condition_variable timer_ready_;
+  std::multimap<std::chrono::steady_clock::time_point, Timer> timers_;
   MpscQueue completed_;
   std::atomic<bool> stopping_{false};
 };

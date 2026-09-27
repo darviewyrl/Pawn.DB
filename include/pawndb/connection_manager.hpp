@@ -6,6 +6,8 @@
 #include <pawndb/session_pool.hpp>
 
 #include <atomic>
+#include <chrono>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <mutex>
@@ -17,7 +19,20 @@
 
 namespace pawndb {
 
-enum class ConnectionState { pending, connected, failed, closing };
+enum class ConnectionState { pending, connected, disconnected, reconnecting, failed, closing };
+inline constexpr auto kMaxReconnectDelay = std::chrono::seconds(15);
+inline constexpr std::chrono::seconds next_reconnect_delay(std::chrono::seconds current) {
+  const auto next = current * 2;
+  return next > kMaxReconnectDelay ? kMaxReconnectDelay : next;
+}
+
+struct PendingQuery {
+  std::string sql;
+  std::function<void(bool, DriverError)> completion;
+  Lifecycle::Context context;
+  void* amx;
+  std::uint32_t handle;
+};
 
 struct Connection {
   explicit Connection(void* script) : owner(script) {}
@@ -27,6 +42,8 @@ struct Connection {
   std::optional<ConnectionConfig> config;
   std::optional<int> debug_level;
   std::shared_ptr<SessionPool> sessions;
+  std::deque<PendingQuery> pending_queries;
+  bool draining_queries = false;
 
   void set_config(ConnectionConfig next) {
     std::lock_guard lock(mutex);
@@ -46,6 +63,7 @@ struct SetupConfiguration {
 class ConnectionManager {
  public:
   using Handle = HandleRegistry::Handle;
+  using QueryCompletion = std::function<void(bool, DriverError)>;
   using ErrorSink = std::function<void(void*, Handle, int, std::string)>;
   using WarningSink = std::function<void(std::string)>;
 
@@ -236,6 +254,35 @@ class ConnectionManager {
     return erased;
   }
 
+  bool query(Handle handle, std::string sql, QueryCompletion completion = {}) {
+    auto connection = handles_.get<Connection>(handle);
+    if (!connection || sql.empty()) return false;
+    auto* pool = life_.active_worker_pool();
+    if (!pool) return false;
+    bool start_drain = false;
+    {
+      std::lock_guard lock(connection->mutex);
+      const auto state = connection->state.load();
+      if (state == ConnectionState::closing || state == ConnectionState::failed ||
+          connection->pending_queries.size() >= 8192 ||
+          (state != ConnectionState::connected && connection->config &&
+           !connection->config->auto_reconnect)) return false;
+      connection->pending_queries.push_back(
+          {std::move(sql), std::move(completion), life_.context(connection->owner),
+           connection->owner, handle});
+      if (state == ConnectionState::connected && !connection->draining_queries) {
+        connection->draining_queries = true;
+        start_drain = true;
+      }
+    }
+    if (start_drain && !pool->submit(0, WorkerPool::Priority::normal,
+                                      [pool, connection] { drain_queries(pool, connection); })) {
+      std::lock_guard lock(connection->mutex);
+      connection->draining_queries = false;
+    }
+    return true;
+  }
+
   bool is_connected(Handle handle) const {
     auto connection = handles_.get<Connection>(handle);
     return connection && connection->state == ConnectionState::connected;
@@ -299,11 +346,16 @@ class ConnectionManager {
       error = {-4, "internal connection failure"};
     }
     if (sessions) {
-      std::lock_guard lock(connection->mutex);
-      if (connection->state == ConnectionState::pending) {
-        connection->sessions = std::move(sessions);
-        connection->state = ConnectionState::connected;
+      {
+        std::lock_guard lock(connection->mutex);
+        if (connection->state == ConnectionState::pending) {
+          connection->sessions = std::move(sessions);
+          connection->state = ConnectionState::connected;
+        }
       }
+      schedule_health(pool, connection, factory, context, handle, amx,
+                      std::chrono::seconds(5), std::chrono::seconds(1));
+      schedule_drain(pool, connection);
       return;
     }
     auto expected = ConnectionState::pending;
@@ -313,6 +365,147 @@ class ConnectionManager {
           if (connection->state == ConnectionState::failed)
             errors(amx, handle, error.code, error.message);
         }));
+  }
+
+  static void schedule_drain(WorkerPool* pool, const std::shared_ptr<Connection>& connection) {
+    bool start = false;
+    {
+      std::lock_guard lock(connection->mutex);
+      if (connection->state == ConnectionState::connected && !connection->pending_queries.empty() &&
+          !connection->draining_queries) {
+        connection->draining_queries = true;
+        start = true;
+      }
+    }
+    if (start && !pool->submit(0, WorkerPool::Priority::normal,
+                               [pool, connection] { drain_queries(pool, connection); })) {
+      std::lock_guard lock(connection->mutex);
+      connection->draining_queries = false;
+    }
+  }
+
+  static void complete_query(WorkerPool* pool, PendingQuery query, bool success,
+                             DriverError error = {}) {
+    if (!query.completion) return;
+    pool->publish(Lifecycle::guard_callback(
+        query.context, [completion = std::move(query.completion), success,
+                        error = std::move(error)]() mutable {
+          completion(success, std::move(error));
+        }));
+  }
+
+  static void drain_queries(WorkerPool* pool, const std::shared_ptr<Connection>& connection) {
+    for (;;) {
+      PendingQuery query;
+      std::shared_ptr<SessionPool> sessions;
+      {
+        std::lock_guard lock(connection->mutex);
+        if (connection->state != ConnectionState::connected || connection->pending_queries.empty()) {
+          connection->draining_queries = false;
+          return;
+        }
+        query = std::move(connection->pending_queries.front());
+        connection->pending_queries.pop_front();
+        sessions = connection->sessions;
+      }
+      DriverError error;
+      bool ok = false;
+      try { ok = sessions && sessions->query(query.sql, error); }
+      catch (const std::exception& exception) { error = {-4, exception.what()}; }
+      catch (...) { error = {-4, "internal query failure"}; }
+      if (!ok) {
+        DriverError ping_error;
+        bool healthy = false;
+        try { healthy = sessions && sessions->ping(ping_error); }
+        catch (...) {}
+        if (!healthy) {
+          std::lock_guard lock(connection->mutex);
+          if (connection->state == ConnectionState::connected) {
+            connection->state = ConnectionState::disconnected;
+            connection->sessions.reset();
+          }
+        }
+        complete_query(pool, std::move(query), false, std::move(error));
+        if (connection->state != ConnectionState::connected) {
+          std::lock_guard lock(connection->mutex);
+          connection->draining_queries = false;
+          return;
+        }
+      } else {
+        complete_query(pool, std::move(query), true);
+      }
+    }
+  }
+
+  static void schedule_health(WorkerPool* pool, const std::shared_ptr<Connection>& connection,
+                              SessionFactory factory, Lifecycle::Context context, Handle handle,
+                              void* amx, std::chrono::seconds interval,
+                              std::chrono::seconds retry) {
+    std::weak_ptr<Connection> weak = connection;
+    pool->schedule(0, interval, [pool, weak, factory = std::move(factory), context, handle,
+                                 amx, retry]() mutable {
+      auto connection = weak.lock();
+      if (!connection) return;
+      ConnectionConfig config;
+      std::shared_ptr<SessionPool> sessions;
+      bool reconnect = false;
+      {
+        std::lock_guard lock(connection->mutex);
+        if (connection->state == ConnectionState::closing ||
+            connection->state == ConnectionState::failed || !connection->config) return;
+        config = *connection->config;
+        if (connection->state == ConnectionState::connected) sessions = connection->sessions;
+        else if ((connection->state == ConnectionState::disconnected ||
+                  connection->state == ConnectionState::reconnecting) && config.auto_reconnect) {
+          connection->state = ConnectionState::reconnecting;
+          reconnect = true;
+        } else return;
+      }
+      DriverError error;
+      if (reconnect) {
+        try { sessions = factory(config, error); }
+        catch (const std::exception& exception) { error = {-4, exception.what()}; }
+        catch (...) { error = {-4, "internal reconnect failure"}; }
+        if (sessions) {
+          {
+            std::lock_guard lock(connection->mutex);
+            if (connection->state != ConnectionState::reconnecting) return;
+            connection->sessions = sessions;
+            connection->state = ConnectionState::connected;
+          }
+          schedule_drain(pool, connection);
+          schedule_health(pool, connection, factory, context, handle, amx,
+                          std::chrono::seconds(5), std::chrono::seconds(1));
+          return;
+        }
+        {
+          std::lock_guard lock(connection->mutex);
+          if (connection->state != ConnectionState::reconnecting) return;
+          connection->state = ConnectionState::disconnected;
+        }
+        const auto next = next_reconnect_delay(retry);
+        schedule_health(pool, connection, std::move(factory), context, handle, amx, retry, next);
+        return;
+      }
+      bool healthy = false;
+      try { healthy = sessions && sessions->ping(error); }
+      catch (...) {}
+      if (healthy) {
+        schedule_drain(pool, connection);
+        schedule_health(pool, connection, std::move(factory), context, handle, amx,
+                        std::chrono::seconds(5), std::chrono::seconds(1));
+        return;
+      }
+      {
+        std::lock_guard lock(connection->mutex);
+        if (connection->state != ConnectionState::connected) return;
+        connection->sessions.reset();
+        connection->state = ConnectionState::disconnected;
+        if (!config.auto_reconnect) return;
+      }
+      schedule_health(pool, connection, std::move(factory), context, handle, amx,
+                      std::chrono::seconds(1), std::chrono::seconds(2));
+    });
   }
 
   static Work connect_work(WorkerPool* pool, std::shared_ptr<Connection> connection,
