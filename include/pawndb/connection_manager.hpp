@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <exception>
 #include <functional>
@@ -34,6 +35,7 @@ struct PendingQuery {
   Lifecycle::Context context;
   void* amx;
   std::uint32_t handle;
+  bool flush_on_shutdown;
 };
 
 struct ConnectionMetrics {
@@ -54,6 +56,9 @@ struct Connection {
   std::atomic<std::shared_ptr<const EscapeSnapshot>> escape_context;
   std::deque<PendingQuery> pending_queries;
   bool draining_queries = false;
+  bool in_flight_flush = false;
+  bool shutting_down = false;
+  std::condition_variable drain_ready;
   std::mutex metrics_mutex;
   std::deque<std::chrono::steady_clock::time_point> successful_queries;
   std::atomic<std::uint64_t> completed_queries{0};
@@ -104,6 +109,7 @@ class ConnectionManager {
   }
 
   Handle connect(void* amx, ConnectionConfig config, Handle setup_handle, bool auto_free_setup) {
+    if (!accepting_.load(std::memory_order_acquire)) return 0;
     if (setup_handle) {
       auto setup = handles_.get<SetupConfiguration>(setup_handle);
       if (!setup) return 0;
@@ -211,7 +217,7 @@ class ConnectionManager {
   }
 
   Handle connect_file(void* amx, std::string path) {
-    if (!amx || path.empty()) return 0;
+    if (!accepting_.load(std::memory_order_acquire) || !amx || path.empty()) return 0;
     auto* pool = life_.worker_pool();
     if (!pool) return 0;
     auto connection = std::make_shared<Connection>(amx);
@@ -260,6 +266,7 @@ class ConnectionManager {
     if (!connection) return false;
     if (connection->state.exchange(ConnectionState::closing) == ConnectionState::closing)
       return false;
+    connection->drain_ready.notify_all();
     owners_[connection->owner].erase(handle);
     const bool erased = handles_.erase<Connection>(handle);
     connection->escape_context.store({}, std::memory_order_release);
@@ -272,7 +279,9 @@ class ConnectionManager {
   }
 
   bool query(Handle handle, std::string sql, QueryCompletion completion = {},
-             WorkerPool::Priority priority = WorkerPool::Priority::normal) {
+             WorkerPool::Priority priority = WorkerPool::Priority::normal,
+             bool flush_on_shutdown = false) {
+    if (!accepting_.load(std::memory_order_acquire)) return false;
     auto connection = handles_.get<Connection>(handle);
     if (!connection || sql.empty()) return false;
     auto* pool = life_.active_worker_pool();
@@ -287,11 +296,61 @@ class ConnectionManager {
            !connection->config->auto_reconnect)) return false;
       connection->pending_queries.push_back(
           {std::move(sql), priority, std::move(completion), life_.context(connection->owner),
-           connection->owner, handle});
+           connection->owner, handle, flush_on_shutdown});
       start_drain = state == ConnectionState::connected && !connection->draining_queries;
     }
     if (start_drain) schedule_drain(pool, connection);
     return true;
+  }
+
+  std::size_t shutdown(std::size_t max_flush = 500) {
+    if (!accepting_.exchange(false, std::memory_order_acq_rel)) return 0;
+    std::vector<std::shared_ptr<Connection>> connections;
+    for (const auto& [_, owned] : owners_)
+      for (const auto handle : owned)
+        if (auto connection = handles_.get<Connection>(handle, false))
+          connections.push_back(std::move(connection));
+
+    auto remaining = max_flush;
+    auto* pool = life_.active_worker_pool();
+    std::size_t selected = 0;
+    for (const auto& connection : connections) {
+      bool start_drain = false;
+      {
+        std::lock_guard lock(connection->mutex);
+        connection->shutting_down = true;
+        if (connection->state == ConnectionState::pending) {
+          connection->state = ConnectionState::closing;
+          connection->pending_queries.clear();
+          connection->drain_ready.notify_all();
+          continue;
+        }
+        std::deque<PendingQuery> retained;
+        if (connection->state == ConnectionState::connected) {
+          if (connection->in_flight_flush && remaining) { --remaining; ++selected; }
+          for (auto& query : connection->pending_queries) {
+            if (query.flush_on_shutdown && remaining) {
+              retained.push_back(std::move(query));
+              --remaining;
+              ++selected;
+            }
+          }
+        }
+        connection->pending_queries = std::move(retained);
+        start_drain = connection->state == ConnectionState::connected &&
+                      !connection->pending_queries.empty() && !connection->draining_queries;
+      }
+      if (start_drain && pool) schedule_drain(pool, connection);
+    }
+    for (const auto& connection : connections) {
+      std::unique_lock lock(connection->mutex);
+      if (!connection->pending_queries.empty() || connection->in_flight_flush)
+        connection->drain_ready.wait(lock, [&] {
+          return connection->state != ConnectionState::connected ||
+                 (connection->pending_queries.empty() && !connection->draining_queries);
+        });
+    }
+    return selected;
   }
 
   bool is_connected(Handle handle) const {
@@ -374,6 +433,7 @@ class ConnectionManager {
   SessionFactory factory_;
   HandleRegistry handles_;
   std::unordered_map<void*, std::unordered_set<Handle>> owners_;
+  std::atomic<bool> accepting_{true};
 
   static void establish(WorkerPool* pool, const std::shared_ptr<Connection>& connection,
                         Lifecycle::Context context, Handle handle, const SessionFactory& factory,
@@ -441,6 +501,7 @@ class ConnectionManager {
                                [pool, connection] { drain_one(pool, connection); })) {
       std::lock_guard lock(connection->mutex);
       connection->draining_queries = false;
+      connection->drain_ready.notify_all();
     }
   }
 
@@ -461,6 +522,7 @@ class ConnectionManager {
       std::lock_guard lock(connection->mutex);
       if (connection->state != ConnectionState::connected || connection->pending_queries.empty()) {
         connection->draining_queries = false;
+        connection->drain_ready.notify_all();
         return;
       }
       auto it = std::find_if(connection->pending_queries.begin(), connection->pending_queries.end(),
@@ -470,6 +532,7 @@ class ConnectionManager {
       if (it == connection->pending_queries.end()) it = connection->pending_queries.begin();
       query = std::move(*it);
       connection->pending_queries.erase(it);
+      connection->in_flight_flush = query.flush_on_shutdown;
       sessions = connection->sessions;
     }
     DriverError error;
@@ -504,12 +567,18 @@ class ConnectionManager {
           connection->state = ConnectionState::disconnected;
           connection->sessions.reset();
         }
+        connection->drain_ready.notify_all();
       }
       complete_query(pool, std::move(query), false, std::move(error));
     } else {
       complete_query(pool, std::move(query), true);
     }
-    { std::lock_guard lock(connection->mutex); connection->draining_queries = false; }
+    {
+      std::lock_guard lock(connection->mutex);
+      connection->in_flight_flush = false;
+      connection->draining_queries = false;
+      connection->drain_ready.notify_all();
+    }
     schedule_drain(pool, connection);
   }
 
@@ -528,7 +597,8 @@ class ConnectionManager {
       {
         std::lock_guard lock(connection->mutex);
         if (connection->state == ConnectionState::closing ||
-            connection->state == ConnectionState::failed || !connection->config) return;
+            connection->state == ConnectionState::failed || connection->shutting_down ||
+            !connection->config) return;
         config = *connection->config;
         if (connection->state == ConnectionState::connected) sessions = connection->sessions;
         else if ((connection->state == ConnectionState::disconnected ||

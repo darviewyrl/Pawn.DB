@@ -46,16 +46,18 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
     if (component != pawn_) return;
     pawn_->getEventDispatcher().removeEventHandler(this);
     pawn_ = nullptr;
+    if (connections_) connections_->shutdown();
     natives_.reset();
     connections_.reset();
     scripts_.clear();
-      lifecycle_.stop();
-      update_checker_.stop();
+    lifecycle_.stop();
+    update_checker_.stop();
   }
 
   void free() override {
     if (pawn_) pawn_->getEventDispatcher().removeEventHandler(this);
     if (core_) core_->getEventDispatcher().removeEventHandler(this);
+    if (connections_) connections_->shutdown();
     natives_.reset();
     connections_.reset();
     scripts_.clear();
@@ -65,6 +67,7 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
   }
 
   void reset() override {
+    if (connections_) connections_->shutdown();
     natives_.reset();
     connections_.reset();
     scripts_.clear();

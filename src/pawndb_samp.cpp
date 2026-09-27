@@ -142,6 +142,7 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data) {
 }
 
 PLUGIN_EXPORT void PLUGIN_CALL Unload() {
+  if (connections) connections->shutdown();
   natives.reset();
   connections.reset();
   lifecycle.stop();

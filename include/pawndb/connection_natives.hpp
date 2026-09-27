@@ -159,7 +159,8 @@ class ConnectionNatives {
       }
     };
     if (manager_.query(handle, std::string(formatted.sql.view()), std::move(completion),
-                       query_request ? WorkerPool::Priority::high : WorkerPool::Priority::normal))
+                       query_request ? WorkerPool::Priority::high : WorkerPool::Priority::normal,
+                       !query_request))
       return true;
     if (invoke_callback_)
       invoke_callback_(amx, "OnQueryError", {static_cast<cell>(handle), cell{-3},
