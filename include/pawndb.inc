@@ -44,3 +44,8 @@ native bool:pdb_is_update_available();
 
 native pdb_format(PDB:handle, output[], max_len = sizeof(output), const format[],
                   {Float, PDBJson, _}:...);
+native pdb_execute(PDB:handle, const format[], {Float, _}:...);
+native pdb_query(PDB:handle, const format[], const callback[], const specifiers[] = "",
+                 {Float, _}:...);
+
+forward OnQueryError(PDB:handle, error_id, const error_msg[], const query[]);

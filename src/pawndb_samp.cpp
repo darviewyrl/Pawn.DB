@@ -41,6 +41,30 @@ void connection_error(AMX* amx, pawndb::ConnectionManager::Handle handle,
   release(amx, address);
 }
 
+void invoke_callback(AMX* amx, std::string_view name,
+                     const std::vector<pawndb::ConnectionNatives::CallbackArg>& args) {
+  if (!find_public || !push_string || !push || !release || !exec) return;
+  int index = 0;
+  const std::string callback(name);
+  if (find_public(amx, callback.c_str(), &index) != AMX_ERR_NONE) return;
+  std::vector<cell> strings;
+  bool pushed = true;
+  for (auto arg = args.rbegin(); arg != args.rend() && pushed; ++arg) {
+    if (const auto* value = std::get_if<cell>(&*arg)) {
+      pushed = push(amx, *value) == AMX_ERR_NONE;
+    } else {
+      const auto& text = std::get<std::string>(*arg);
+      cell address = 0;
+      pushed = push_string(amx, &address, nullptr, text.c_str(), 0, 0) == AMX_ERR_NONE;
+      if (pushed) strings.push_back(address);
+    }
+  }
+  cell result = 0;
+  if (pushed) exec(amx, &result, index);
+  for (auto address = strings.rbegin(); address != strings.rend(); ++address)
+    release(amx, *address);
+}
+
 }  // namespace
 
 PLUGIN_EXPORT unsigned int PLUGIN_CALL Supports() {
@@ -107,7 +131,7 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data) {
         cell* source = nullptr;
         return get_addr(amx, address, &source) == AMX_ERR_NONE &&
                get_string(output.data(), source, 0, output.size()) == AMX_ERR_NONE;
-      });
+      }, invoke_callback);
   return true;
 }
 

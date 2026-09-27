@@ -144,6 +144,30 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
           cell* source = nullptr;
           return it->second->GetAddr(address, &source) == AMX_ERR_NONE &&
                  it->second->GetString(output.data(), source, false, output.size()) == AMX_ERR_NONE;
+        }, [this](AMX* amx, std::string_view name,
+                  const std::vector<pawndb::ConnectionNatives::CallbackArg>& args) {
+          const auto it = scripts_.find(amx);
+          if (it == scripts_.end()) return;
+          int index = 0;
+          const std::string callback(name);
+          if (it->second->FindPublic(callback.c_str(), &index) != AMX_ERR_NONE) return;
+          std::vector<cell> strings;
+          bool pushed = true;
+          for (auto arg = args.rbegin(); arg != args.rend() && pushed; ++arg) {
+            if (const auto* value = std::get_if<cell>(&*arg)) {
+              pushed = it->second->Push(*value) == AMX_ERR_NONE;
+            } else {
+              const auto& text = std::get<std::string>(*arg);
+              cell address = 0;
+              pushed = it->second->PushString(&address, nullptr,
+                  StringView(text.data(), text.size()), false, false) == AMX_ERR_NONE;
+              if (pushed) strings.push_back(address);
+            }
+          }
+          cell result = 0;
+          if (pushed) it->second->Exec(&result, index);
+          for (auto address = strings.rbegin(); address != strings.rend(); ++address)
+            it->second->Release(*address);
         });
   }
 

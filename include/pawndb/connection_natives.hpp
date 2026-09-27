@@ -9,6 +9,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
+#include <vector>
 
 namespace pawndb {
 
@@ -25,13 +27,17 @@ class ConnectionNatives {
   using StringCopy = std::function<bool(AMX*, cell, std::span<char>)>;
   using Write = std::function<bool(AMX*, cell, std::string_view, std::size_t)>;
   using UpdateAvailable = std::function<bool()>;
+  using CallbackArg = std::variant<cell, std::string>;
+  using InvokeCallback = std::function<void(AMX*, std::string_view,
+                                            const std::vector<CallbackArg>&)>;
 
   ConnectionNatives(ConnectionManager& manager, Read read, Write write,
                     UpdateAvailable update_available, StringLength string_length = {},
-                    StringCopy string_copy = {})
+                    StringCopy string_copy = {}, InvokeCallback invoke_callback = {})
       : manager_(manager), read_(std::move(read)), write_(std::move(write)),
         update_available_(std::move(update_available)),
-        string_length_(std::move(string_length)), string_copy_(std::move(string_copy)) {
+        string_length_(std::move(string_length)), string_copy_(std::move(string_copy)),
+        invoke_callback_(std::move(invoke_callback)) {
     current_ = this;
   }
   ~ConnectionNatives() { current_ = nullptr; }
@@ -45,10 +51,12 @@ class ConnectionNatives {
         {"pdb_setup_charset", setup_charset}, {"pdb_setup_option", setup_option},
         {"pdb_setup_driver", setup_driver}, {"pdb_setup_ssl", setup_ssl},
         {"pdb_is_update_available", is_update_available},
-        {"pdb_format", format},
+        {"pdb_format", format}, {"pdb_execute", execute}, {"pdb_query", query},
         {nullptr, nullptr}};
     return natives;
   }
+
+  static constexpr int native_count = 16;
 
   SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
     return format_at(amx, params, 1, 4, 5);
@@ -104,7 +112,57 @@ class ConnectionNatives {
     }
   }
 
- private:
+  bool submit(AMX* amx, NativeParams params, bool query_request) const {
+    const int count = argc(params);
+    constexpr int format_index = 2;
+    const int first_variadic = query_request ? 5 : 3;
+    if (!amx || count < first_variadic - 1) return false;
+    std::string callback_name, specifiers;
+    std::vector<CallbackArg> callback_args;
+    if (query_request) {
+      try {
+        if (!read_(amx, params[3], callback_name) || callback_name.empty() ||
+            !read_(amx, params[4], specifiers)) return false;
+        const auto available = static_cast<std::size_t>(count - first_variadic + 1);
+        if (specifiers.size() > available) return false;
+        callback_args.reserve(specifiers.size());
+        for (std::size_t i = 0; i < specifiers.size(); ++i) {
+          const cell value = params[first_variadic + static_cast<int>(i)];
+          if (specifiers[i] == 'd' || specifiers[i] == 'i' || specifiers[i] == 'f')
+            callback_args.emplace_back(value);
+          else if (specifiers[i] == 's') {
+            std::string text;
+            if (!read_(amx, value, text)) return false;
+            callback_args.emplace_back(std::move(text));
+          } else return false;
+        }
+      } catch (...) { return false; }
+    }
+    auto formatted = format_at(amx, params, 1, format_index, first_variadic);
+    if (!formatted) return false;
+    const auto handle = static_cast<std::uint32_t>(params[1]);
+    auto invoke = invoke_callback_;
+    auto completion = [invoke = std::move(invoke), amx, handle,
+                       callback_name = std::move(callback_name),
+                       callback_args = std::move(callback_args)](bool ok, DriverError error) {
+      if (!invoke) return;
+      if (ok && !callback_name.empty()) {
+        invoke(amx, callback_name, callback_args);
+      } else if (!ok) {
+        invoke(amx, "OnQueryError", {static_cast<cell>(handle), static_cast<cell>(error.code),
+                                      std::move(error.message), std::string("<redacted>")});
+      }
+    };
+    if (manager_.query(handle, std::string(formatted.sql.view()), std::move(completion),
+                       query_request ? WorkerPool::Priority::high : WorkerPool::Priority::normal))
+      return true;
+    if (invoke_callback_)
+      invoke_callback_(amx, "OnQueryError", {static_cast<cell>(handle), cell{-3},
+                                               std::string("query was not accepted"),
+                                               std::string("<redacted>")});
+    return false;
+  }
+
   static int argc(NativeParams params) {
     return params && params[0] >= 0 && params[0] % sizeof(cell) == 0
                ? params[0] / sizeof(cell) : -1;
@@ -200,17 +258,23 @@ class ConnectionNatives {
     return current_ && argc(params) == 0 && current_->update_available_();
   }
 
-  static constexpr int native_count = 14;
-
   static cell AMX_NATIVE_CALL format(AMX* amx, NativeParams params) {
     if (!current_ || argc(params) < 4 || params[3] <= 0) return 0;
     try {
       auto result = current_->format_at(amx, params, 1, 4, 5);
       const auto capacity = static_cast<std::size_t>(params[3]);
-      const std::string_view output = result ? result.sql.view() : std::string_view("");
+      const auto output = result ? result.sql.view() : std::string_view{};
       if (!current_->write_(amx, params[2], output, capacity)) return 0;
       return static_cast<cell>(result ? std::min(output.size(), capacity - 1) : 0);
     } catch (...) { return 0; }
+  }
+
+  static cell AMX_NATIVE_CALL execute(AMX* amx, NativeParams params) {
+    return current_ && argc(params) >= 2 && current_->submit(amx, params, false);
+  }
+
+  static cell AMX_NATIVE_CALL query(AMX* amx, NativeParams params) {
+    return current_ && argc(params) >= 4 && current_->submit(amx, params, true);
   }
 
   ConnectionManager& manager_;
@@ -219,6 +283,7 @@ class ConnectionNatives {
   UpdateAvailable update_available_;
   StringLength string_length_;
   StringCopy string_copy_;
+  InvokeCallback invoke_callback_;
   inline static ConnectionNatives* current_ = nullptr;
 };
 

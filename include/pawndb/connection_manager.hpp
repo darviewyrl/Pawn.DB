@@ -5,6 +5,7 @@
 #include <pawndb/lifecycle.hpp>
 #include <pawndb/session_pool.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -28,6 +29,7 @@ inline constexpr std::chrono::seconds next_reconnect_delay(std::chrono::seconds 
 
 struct PendingQuery {
   std::string sql;
+  WorkerPool::Priority priority;
   std::function<void(bool, DriverError)> completion;
   Lifecycle::Context context;
   void* amx;
@@ -256,7 +258,8 @@ class ConnectionManager {
     return erased;
   }
 
-  bool query(Handle handle, std::string sql, QueryCompletion completion = {}) {
+  bool query(Handle handle, std::string sql, QueryCompletion completion = {},
+             WorkerPool::Priority priority = WorkerPool::Priority::normal) {
     auto connection = handles_.get<Connection>(handle);
     if (!connection || sql.empty()) return false;
     auto* pool = life_.active_worker_pool();
@@ -270,18 +273,11 @@ class ConnectionManager {
           (state != ConnectionState::connected && connection->config &&
            !connection->config->auto_reconnect)) return false;
       connection->pending_queries.push_back(
-          {std::move(sql), std::move(completion), life_.context(connection->owner),
+          {std::move(sql), priority, std::move(completion), life_.context(connection->owner),
            connection->owner, handle});
-      if (state == ConnectionState::connected && !connection->draining_queries) {
-        connection->draining_queries = true;
-        start_drain = true;
-      }
+      start_drain = state == ConnectionState::connected && !connection->draining_queries;
     }
-    if (start_drain && !pool->submit(0, WorkerPool::Priority::normal,
-                                      [pool, connection] { drain_queries(pool, connection); })) {
-      std::lock_guard lock(connection->mutex);
-      connection->draining_queries = false;
-    }
+    if (start_drain) schedule_drain(pool, connection);
     return true;
   }
 
@@ -383,17 +379,22 @@ class ConnectionManager {
   }
 
   static void schedule_drain(WorkerPool* pool, const std::shared_ptr<Connection>& connection) {
+    WorkerPool::Priority priority = WorkerPool::Priority::normal;
     bool start = false;
     {
       std::lock_guard lock(connection->mutex);
       if (connection->state == ConnectionState::connected && !connection->pending_queries.empty() &&
           !connection->draining_queries) {
         connection->draining_queries = true;
+        if (std::any_of(connection->pending_queries.begin(), connection->pending_queries.end(),
+                        [](const PendingQuery& query) {
+                          return query.priority == WorkerPool::Priority::high;
+                        })) priority = WorkerPool::Priority::high;
         start = true;
       }
     }
-    if (start && !pool->submit(0, WorkerPool::Priority::normal,
-                               [pool, connection] { drain_queries(pool, connection); })) {
+    if (start && !pool->submit(0, priority,
+                               [pool, connection] { drain_one(pool, connection); })) {
       std::lock_guard lock(connection->mutex);
       connection->draining_queries = false;
     }
@@ -409,47 +410,47 @@ class ConnectionManager {
         }));
   }
 
-  static void drain_queries(WorkerPool* pool, const std::shared_ptr<Connection>& connection) {
-    for (;;) {
-      PendingQuery query;
-      std::shared_ptr<SessionPool> sessions;
-      {
-        std::lock_guard lock(connection->mutex);
-        if (connection->state != ConnectionState::connected || connection->pending_queries.empty()) {
-          connection->draining_queries = false;
-          return;
-        }
-        query = std::move(connection->pending_queries.front());
-        connection->pending_queries.pop_front();
-        sessions = connection->sessions;
+  static void drain_one(WorkerPool* pool, const std::shared_ptr<Connection>& connection) {
+    PendingQuery query;
+    std::shared_ptr<SessionPool> sessions;
+    {
+      std::lock_guard lock(connection->mutex);
+      if (connection->state != ConnectionState::connected || connection->pending_queries.empty()) {
+        connection->draining_queries = false;
+        return;
       }
-      DriverError error;
-      bool ok = false;
-      try { ok = sessions && sessions->query(query.sql, error); }
-      catch (const std::exception& exception) { error = {-4, exception.what()}; }
-      catch (...) { error = {-4, "internal query failure"}; }
-      if (!ok) {
-        DriverError ping_error;
-        bool healthy = false;
-        try { healthy = sessions && sessions->ping(ping_error); }
-        catch (...) {}
-        if (!healthy) {
-          std::lock_guard lock(connection->mutex);
-          if (connection->state == ConnectionState::connected) {
-            connection->state = ConnectionState::disconnected;
-            connection->sessions.reset();
-          }
-        }
-        complete_query(pool, std::move(query), false, std::move(error));
-        if (connection->state != ConnectionState::connected) {
-          std::lock_guard lock(connection->mutex);
-          connection->draining_queries = false;
-          return;
-        }
-      } else {
-        complete_query(pool, std::move(query), true);
-      }
+      auto it = std::find_if(connection->pending_queries.begin(), connection->pending_queries.end(),
+                             [](const PendingQuery& pending) {
+                               return pending.priority == WorkerPool::Priority::high;
+                             });
+      if (it == connection->pending_queries.end()) it = connection->pending_queries.begin();
+      query = std::move(*it);
+      connection->pending_queries.erase(it);
+      sessions = connection->sessions;
     }
+    DriverError error;
+    bool ok = false;
+    try { ok = sessions && sessions->query(query.sql, error); }
+    catch (const std::exception& exception) { error = {-4, exception.what()}; }
+    catch (...) { error = {-4, "internal query failure"}; }
+    if (!ok) {
+      DriverError ping_error;
+      bool healthy = false;
+      try { healthy = sessions && sessions->ping(ping_error); }
+      catch (...) {}
+      if (!healthy) {
+        std::lock_guard lock(connection->mutex);
+        if (connection->state == ConnectionState::connected) {
+          connection->state = ConnectionState::disconnected;
+          connection->sessions.reset();
+        }
+      }
+      complete_query(pool, std::move(query), false, std::move(error));
+    } else {
+      complete_query(pool, std::move(query), true);
+    }
+    { std::lock_guard lock(connection->mutex); connection->draining_queries = false; }
+    schedule_drain(pool, connection);
   }
 
   static void schedule_health(WorkerPool* pool, const std::shared_ptr<Connection>& connection,

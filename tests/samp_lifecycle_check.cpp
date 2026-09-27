@@ -69,7 +69,7 @@ int AMXAPI fake_exec(AMX*, cell*, int index) {
 int AMXAPI fake_release(AMX*, cell) { return AMX_ERR_NONE; }
 
 int AMXAPI register_connections(AMX* amx, const AMX_NATIVE_INFO* natives, int count) {
-  if (count != 13 || natives[count].name || natives[count].func) return AMX_ERR_PARAMS;
+  if (count != 16 || natives[count].name || natives[count].func) return AMX_ERR_PARAMS;
   for (int i = 0; i < count; ++i)
     if (!natives[i].name || std::strncmp(natives[i].name, "pdb_", 4) || !natives[i].func)
       return AMX_ERR_PARAMS;
