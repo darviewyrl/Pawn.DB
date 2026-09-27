@@ -20,6 +20,32 @@ jobs:
           ./dispatch_tsan
           g++ -std=c++20 -pthread -fsanitize=thread -fPIE -pie -g -Iinclude -Ithird_party/json/include tests/connection_manager_check.cpp -o connection_manager_tsan
           ./connection_manager_tsan
+          g++ -std=c++20 -pthread -fsanitize=thread -fPIE -pie -g -Iinclude -Ithird_party/omp-pawn-compiler/source -Ithird_party/omp-pawn-compiler/source/linux -DHAVE_STDINT_H=1 -DPAWN_CELL_SIZE=32 -DPAWNDB_OMP=1 tests/async_query_check.cpp -o async_query_tsan
+          ./async_query_tsan
+          g++ -std=c++20 -pthread -fsanitize=thread -fPIE -pie -g -Iinclude -Ithird_party/json/include tests/telemetry_check.cpp -o telemetry_tsan
+          ./telemetry_tsan
+          g++ -std=c++20 -pthread -fsanitize=thread -fPIE -pie -g -Iinclude -Ithird_party/json/include tests/shutdown_check.cpp -o shutdown_tsan
+          ./shutdown_tsan
+  worker-asan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Check async pipeline, telemetry and shutdown with ASan
+        run: |
+          g++ -std=c++20 -pthread -fsanitize=address -fno-omit-frame-pointer -g -Iinclude tests/worker_pool_check.cpp -o worker_pool_asan
+          ./worker_pool_asan
+          g++ -std=c++20 -pthread -fsanitize=address -fno-omit-frame-pointer -g -Iinclude tests/dispatch_check.cpp -o dispatch_asan
+          ./dispatch_asan
+          g++ -std=c++20 -pthread -fsanitize=address -fno-omit-frame-pointer -g -Iinclude -Ithird_party/json/include tests/connection_manager_check.cpp -o connection_manager_asan
+          ./connection_manager_asan
+          g++ -std=c++20 -pthread -fsanitize=address -fno-omit-frame-pointer -g -Iinclude -Ithird_party/omp-pawn-compiler/source -Ithird_party/omp-pawn-compiler/source/linux -DHAVE_STDINT_H=1 -DPAWN_CELL_SIZE=32 -DPAWNDB_OMP=1 tests/async_query_check.cpp -o async_query_asan
+          ./async_query_asan
+          g++ -std=c++20 -pthread -fsanitize=address -fno-omit-frame-pointer -g -Iinclude -Ithird_party/json/include tests/telemetry_check.cpp -o telemetry_asan
+          ./telemetry_asan
+          g++ -std=c++20 -pthread -fsanitize=address -fno-omit-frame-pointer -g -Iinclude -Ithird_party/json/include tests/shutdown_check.cpp -o shutdown_asan
+          ./shutdown_asan
   build:
     name: ${{ matrix.target }} ${{ matrix.os }} ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
@@ -94,3 +120,26 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./ci/build-windows.ps1 '${{ matrix.arch }}' '${{ matrix.target }}'
+      - name: Verify async pipeline, telemetry and shutdown with ASan
+        if: matrix.os == 'windows-2022' && matrix.arch == 'x64' && matrix.target == 'omp'
+        shell: pwsh
+        run: |
+          $common = @('/nologo', '/std:c++20', '/EHsc', '/fsanitize=address', '/MD', '/Iinclude')
+          & cl @common tests/worker_pool_check.cpp /Fe:worker_pool_asan.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\worker_pool_asan.exe
+          & cl @common tests/dispatch_check.cpp /Fe:dispatch_asan.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\dispatch_asan.exe
+          & cl @common /Ithird_party/json/include tests/connection_manager_check.cpp /Fe:connection_manager_asan.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\connection_manager_asan.exe
+          & cl @common /Ithird_party/json/include tests/telemetry_check.cpp /Fe:telemetry_asan.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\telemetry_asan.exe
+          & cl @common /Ithird_party/json/include tests/shutdown_check.cpp /Fe:shutdown_asan.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\shutdown_asan.exe
+          & cl @common /Ithird_party/json/include /Ithird_party/omp-pawn-compiler/source /Ithird_party/omp-pawn-compiler/source/linux /DHAVE_STDINT_H=1 /DPAWN_CELL_SIZE=32 /DPAWNDB_OMP=1 tests/async_query_check.cpp /Fe:async_query_asan.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\async_query_asan.exe
