@@ -1,0 +1,10 @@
+/build/
+/.vs/
+*.dll
+*.so
+*.a
+*.lib
+*.obj
+*.o
+*.pdb
+*.dmp
