@@ -92,7 +92,22 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data) {
         if (get_addr(amx, address, &output) != AMX_ERR_NONE) return false;
         const std::string truncated(value.substr(0, capacity - 1));
         return set_string(output, truncated.c_str(), 0, 0, capacity) == AMX_ERR_NONE;
-      }, [] { return update_checker.available(); });
+      }, [] { return update_checker.available(); },
+      [](AMX* amx, cell address, std::size_t& length) {
+        if (!get_addr || !str_len) return false;
+        cell* source = nullptr;
+        int characters = 0;
+        if (get_addr(amx, address, &source) != AMX_ERR_NONE ||
+            str_len(source, &characters) != AMX_ERR_NONE || characters < 0) return false;
+        length = static_cast<std::size_t>(characters);
+        return true;
+      },
+      [](AMX* amx, cell address, std::span<char> output) {
+        if (!get_addr || !get_string || output.empty()) return false;
+        cell* source = nullptr;
+        return get_addr(amx, address, &source) == AMX_ERR_NONE &&
+               get_string(output.data(), source, 0, output.size()) == AMX_ERR_NONE;
+      });
   return true;
 }
 

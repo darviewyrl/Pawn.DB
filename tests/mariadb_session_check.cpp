@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <string>
 #include <thread>
+#include <vector>
 
 int main(int argc, char** argv) {
   pawndb::ConnectionConfig config;
@@ -33,7 +34,14 @@ int main(int argc, char** argv) {
         auto sessions = pawndb::MariaPool::open(config, error);
         if (online && sessions) {
           pawndb::DriverError query_error;
-          passed = sessions->query("SELECT SLEEP(0.2)", query_error) &&
+          const std::string input = "ไทย'; SELECT 1; --\\";
+          std::vector<char> escaped(input.size() * 2 + 1);
+          std::size_t escaped_size = 0;
+          passed = sessions->escape_string(input, escaped, escaped_size) &&
+                   std::string_view(escaped.data(), escaped_size).starts_with("ไทย") &&
+                   sessions->query("SELECT '" + std::string(escaped.data(), escaped_size) + "'",
+                                   query_error) &&
+                   sessions->query("SELECT SLEEP(0.2)", query_error) &&
                    !sessions->query("INVALID SQL", query_error) && query_error.code > 0 &&
                    sessions->query("SELECT 1", query_error);
         } else if (!online) {

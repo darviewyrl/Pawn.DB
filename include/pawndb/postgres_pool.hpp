@@ -5,8 +5,10 @@
 #include <libpq-fe.h>
 
 #include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <vector>
 
 namespace pawndb {
@@ -15,6 +17,7 @@ class PostgresPool final : public SessionPool {
  public:
   ~PostgresPool() override {
     for (auto* session : sessions_) PQfinish(session);
+    if (escape_session_) PQfinish(escape_session_);
   }
 
   static std::shared_ptr<SessionPool> open(const ConnectionConfig& config, DriverError& error) {
@@ -51,6 +54,13 @@ class PostgresPool final : public SessionPool {
       session.release();
       pool->busy_.push_back(false);
     }
+    std::unique_ptr<PGconn, decltype(&PQfinish)> escape(PQconnectdbParams(keys, values, 0), PQfinish);
+    if (!escape || PQstatus(escape.get()) != CONNECTION_OK) {
+      error = {kPostgresNoSqlstate, escape ? PQerrorMessage(escape.get()) :
+                                               "PostgreSQL escape connection initialization failed"};
+      return {};
+    }
+    pool->escape_session_ = escape.release();
     return pool;
   }
 
@@ -86,6 +96,16 @@ class PostgresPool final : public SessionPool {
     return ok;
   }
 
+  bool escape_string(std::string_view input, std::span<char> output,
+                     std::size_t& written) const override {
+    if (!escape_session_ || input.size() > (std::numeric_limits<std::size_t>::max() - 1) / 2 ||
+        output.size() < input.size() * 2 + 1) return false;
+    int error = 0;
+    const auto* data = input.empty() ? "" : input.data();
+    written = PQescapeStringConn(escape_session_, output.data(), data, input.size(), &error);
+    return error == 0 && written < output.size();
+  }
+
  private:
   PostgresPool() = default;
   std::mutex mutex_;
@@ -93,6 +113,7 @@ class PostgresPool final : public SessionPool {
   std::vector<PGconn*> sessions_;
   std::vector<bool> busy_;
   bool multi_statements_ = false;
+  PGconn* escape_session_ = nullptr;
 };
 
 }  // namespace pawndb

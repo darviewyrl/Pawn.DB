@@ -126,7 +126,24 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
           const auto truncated = value.substr(0, capacity - 1);
           return it->second->SetString(output, StringView(truncated.data(), truncated.size()),
                                        false, false, capacity) == AMX_ERR_NONE;
-        }, [this] { return update_checker_.available(); });
+        }, [this] { return update_checker_.available(); },
+        [this](AMX* amx, cell address, std::size_t& length) {
+          auto it = scripts_.find(amx);
+          if (it == scripts_.end()) return false;
+          cell* source = nullptr;
+          int characters = 0;
+          if (it->second->GetAddr(address, &source) != AMX_ERR_NONE ||
+              it->second->StrLen(source, &characters) != AMX_ERR_NONE || characters < 0) return false;
+          length = static_cast<std::size_t>(characters);
+          return true;
+        },
+        [this](AMX* amx, cell address, std::span<char> output) {
+          auto it = scripts_.find(amx);
+          if (it == scripts_.end() || output.empty()) return false;
+          cell* source = nullptr;
+          return it->second->GetAddr(address, &source) == AMX_ERR_NONE &&
+                 it->second->GetString(output.data(), source, false, output.size()) == AMX_ERR_NONE;
+        });
   }
 
   void onConnectionError(AMX* amx, pawndb::ConnectionManager::Handle handle,

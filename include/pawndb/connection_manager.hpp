@@ -42,6 +42,7 @@ struct Connection {
   std::optional<ConnectionConfig> config;
   std::optional<int> debug_level;
   std::shared_ptr<SessionPool> sessions;
+  std::atomic<std::shared_ptr<const EscapeSnapshot>> escape_context;
   std::deque<PendingQuery> pending_queries;
   bool draining_queries = false;
 
@@ -246,6 +247,7 @@ class ConnectionManager {
       return false;
     owners_[connection->owner].erase(handle);
     const bool erased = handles_.erase<Connection>(handle);
+    connection->escape_context.store({}, std::memory_order_release);
     if (auto* pool = life_.active_worker_pool())
       pool->defer_cleanup(0, [connection] {
         std::lock_guard lock(connection->mutex);
@@ -287,6 +289,13 @@ class ConnectionManager {
     auto connection = handles_.get<Connection>(handle);
     return connection && connection->state == ConnectionState::connected;
   }
+
+  std::shared_ptr<const EscapeSnapshot> escape_snapshot(Handle handle) const {
+    auto connection = handles_.get<Connection>(handle);
+    return connection ? connection->escape_context.load(std::memory_order_acquire) : nullptr;
+  }
+
+  void report_format_error(std::string message) const { warnings_(std::move(message)); }
 
   bool set_debug_level(Handle handle, int level) {
     auto connection = handles_.get<Connection>(handle);
@@ -346,13 +355,19 @@ class ConnectionManager {
       error = {-4, "internal connection failure"};
     }
     if (sessions) {
+      bool established = false;
       {
         std::lock_guard lock(connection->mutex);
         if (connection->state == ConnectionState::pending) {
-          connection->sessions = std::move(sessions);
+          connection->sessions = sessions;
+          connection->escape_context.store(make_escape_snapshot(pool, connection->config->backend,
+                                                                 sessions),
+                                           std::memory_order_release);
           connection->state = ConnectionState::connected;
+          established = true;
         }
       }
+      if (!established) return;
       schedule_health(pool, connection, factory, context, handle, amx,
                       std::chrono::seconds(5), std::chrono::seconds(1));
       schedule_drain(pool, connection);
@@ -471,6 +486,8 @@ class ConnectionManager {
             std::lock_guard lock(connection->mutex);
             if (connection->state != ConnectionState::reconnecting) return;
             connection->sessions = sessions;
+            connection->escape_context.store(make_escape_snapshot(pool, config.backend, sessions),
+                                             std::memory_order_release);
             connection->state = ConnectionState::connected;
           }
           schedule_drain(pool, connection);
@@ -506,6 +523,14 @@ class ConnectionManager {
       schedule_health(pool, connection, std::move(factory), context, handle, amx,
                       std::chrono::seconds(1), std::chrono::seconds(2));
     });
+  }
+
+  static std::shared_ptr<const EscapeSnapshot> make_escape_snapshot(
+      WorkerPool* pool, Backend backend, const std::shared_ptr<SessionPool>& sessions) {
+    auto* snapshot = new EscapeSnapshot{backend, sessions};
+    return {snapshot, [pool](const EscapeSnapshot* old) {
+      pool->defer_cleanup(0, [old] { delete old; });
+    }};
   }
 
   static Work connect_work(WorkerPool* pool, std::shared_ptr<Connection> connection,

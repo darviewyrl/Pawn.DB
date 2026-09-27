@@ -1,5 +1,6 @@
 #include <pawndb/connection_natives.hpp>
 
+#include <cstring>
 #include <string>
 
 int main() {
@@ -10,6 +11,7 @@ int main() {
   pawndb::ConnectionManager manager(life, [](void*, auto, int, std::string) {},
                                     [](std::string) {});
   std::string output;
+  int argument_reads = 0;
   pawndb::ConnectionNatives natives(manager,
       [](AMX*, cell address, std::string& value) {
         switch (address) {
@@ -24,7 +26,22 @@ int main() {
       }, [&](AMX*, cell, std::string_view value, std::size_t capacity) {
         output = value.substr(0, capacity - 1);
         return true;
-      }, [] { return true; });
+      }, [] { return true; }, [&](AMX*, cell address, std::size_t& length) {
+        if (address == 11) ++argument_reads;
+        const std::string_view value = address == 10 ? "SELECT %d, %s" :
+                                       address == 11 ? "hello" : "";
+        if (value.empty()) return false;
+        length = value.size();
+        return true;
+      }, [&](AMX*, cell address, std::span<char> output) {
+        if (address == 11) ++argument_reads;
+        const std::string_view value = address == 10 ? "SELECT %d, %s" :
+                                       address == 11 ? "hello" : "";
+        if (value.empty() || output.size() < value.size() + 1) return false;
+        std::memcpy(output.data(), value.data(), value.size());
+        output[value.size()] = '\0';
+        return true;
+      });
   const auto* table = pawndb::ConnectionNatives::table();
   auto native = [table](const char* name) {
     for (auto* item = table; item->name; ++item)
@@ -49,6 +66,13 @@ int main() {
   const cell connect[] = {6 * sizeof(cell), 1, 2, 3, 4, 3307, setup};
   const cell handle = native("pdb_connect")(&amx, connect);
   if (!handle) return 1;
+  const cell variadic[] = {6 * sizeof(cell), handle, 0, 0, 10, 42, 11};
+  auto formatted = natives.format_variadic(&amx, variadic);
+  if (!formatted || formatted.sql.view() != "SELECT 42, hello" || argument_reads != 2) return 1;
+  argument_reads = 0;
+  const cell underflow[] = {5 * sizeof(cell), handle, 0, 0, 10, 42};
+  const auto rejected = natives.format_variadic(&amx, underflow);
+  if (rejected.error != pawndb::SqlFormatError::stack_underflow || argument_reads) return 1;
   cell one[] = {sizeof(cell), handle};
   if (native("pdb_is_connected")(&amx, one)) return 1;
   cell driver_name[] = {3 * sizeof(cell), handle, 9, 32};

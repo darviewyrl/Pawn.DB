@@ -4,8 +4,10 @@
 #include <mysql.h>
 
 #include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <vector>
 
 namespace pawndb {
@@ -14,6 +16,7 @@ class MariaPool final : public SessionPool {
  public:
   ~MariaPool() override {
     for (auto* session : sessions_) mysql_close(session);
+    if (escape_session_) mysql_close(escape_session_);
   }
 
   static std::shared_ptr<SessionPool> open(const ConnectionConfig& config, DriverError& error) {
@@ -49,6 +52,26 @@ class MariaPool final : public SessionPool {
       session.release();
       pool->busy_.push_back(false);
     }
+    std::unique_ptr<MYSQL, decltype(&mysql_close)> escape(mysql_init(nullptr), mysql_close);
+    const auto flags = config.multi_statements ? CLIENT_MULTI_STATEMENTS : 0;
+    if (!escape || mysql_options(escape.get(), MYSQL_OPT_CONNECT_TIMEOUT, &timeout) ||
+        mysql_options(escape.get(), MYSQL_SET_CHARSET_NAME, config.charset.c_str()) ||
+        (config.ssl_enabled &&
+         (mysql_ssl_set(escape.get(), config.client_key.empty() ? nullptr : config.client_key.c_str(),
+                        config.client_cert.empty() ? nullptr : config.client_cert.c_str(),
+                        config.ca_cert.c_str(), nullptr, nullptr) ||
+          mysql_options(escape.get(), MYSQL_OPT_SSL_ENFORCE, &ssl_enforce) ||
+          mysql_options(escape.get(), MYSQL_OPT_SSL_VERIFY_SERVER_CERT, &verify_server) ||
+          mysql_options(escape.get(), MYSQL_OPT_TLS_VERSION, tls_versions))) ||
+        !mysql_real_connect(escape.get(), config.host.c_str(), config.user.c_str(),
+                            config.password.c_str(), config.database.c_str(),
+                            static_cast<unsigned int>(config.port), nullptr, flags)) {
+      error = {escape ? static_cast<int>(mysql_errno(escape.get())) : -4,
+               escape ? mysql_error(escape.get()) : "MariaDB escape connection initialization failed"};
+      if (!error.code) error.code = -4;
+      return {};
+    }
+    pool->escape_session_ = escape.release();
     return pool;
   }
 
@@ -84,12 +107,23 @@ class MariaPool final : public SessionPool {
     return ok;
   }
 
+  bool escape_string(std::string_view input, std::span<char> output,
+                     std::size_t& written) const override {
+    if (!escape_session_ || input.size() > (std::numeric_limits<unsigned long>::max() - 1) / 2 ||
+        output.size() < input.size() * 2 + 1) return false;
+    const auto* data = input.empty() ? "" : input.data();
+    written = mysql_real_escape_string(escape_session_, output.data(), data,
+                                       static_cast<unsigned long>(input.size()));
+    return written < output.size();
+  }
+
  private:
   MariaPool() = default;
   std::mutex mutex_;
   std::condition_variable cv_;
   std::vector<MYSQL*> sessions_;
   std::vector<bool> busy_;
+  MYSQL* escape_session_ = nullptr;
 };
 
 }  // namespace pawndb

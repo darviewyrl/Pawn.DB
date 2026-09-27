@@ -1,9 +1,11 @@
 #pragma once
 
 #include <pawndb/connection_manager.hpp>
+#include <pawndb/sql_formatter.hpp>
 #include <amx/amx.h>
 
 #include <functional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -18,13 +20,17 @@ using NativeParams = cell*;
 class ConnectionNatives {
  public:
   using Read = std::function<bool(AMX*, cell, std::string&)>;
+  using StringLength = std::function<bool(AMX*, cell, std::size_t&)>;
+  using StringCopy = std::function<bool(AMX*, cell, std::span<char>)>;
   using Write = std::function<bool(AMX*, cell, std::string_view, std::size_t)>;
   using UpdateAvailable = std::function<bool()>;
 
   ConnectionNatives(ConnectionManager& manager, Read read, Write write,
-                    UpdateAvailable update_available)
+                    UpdateAvailable update_available, StringLength string_length = {},
+                    StringCopy string_copy = {})
       : manager_(manager), read_(std::move(read)), write_(std::move(write)),
-        update_available_(std::move(update_available)) {
+        update_available_(std::move(update_available)),
+        string_length_(std::move(string_length)), string_copy_(std::move(string_copy)) {
     current_ = this;
   }
   ~ConnectionNatives() { current_ = nullptr; }
@@ -40,6 +46,54 @@ class ConnectionNatives {
         {"pdb_is_update_available", is_update_available},
         {nullptr, nullptr}};
     return natives;
+  }
+
+  SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
+    const int count = argc(params);
+    SqlFormatResult failure;
+    failure.error = SqlFormatError::malformed;
+    if (!amx || count < 4 || !string_length_ || !string_copy_) {
+      manager_.report_format_error("[Pawn.DB Warning] Invalid SQL format arguments.");
+      return failure;
+    }
+    try {
+      PawnStringScratch format;
+      const auto length = [this, amx](std::int32_t address, std::size_t& size) {
+        return string_length_(amx, static_cast<cell>(address), size);
+      };
+      const auto copy = [this, amx](std::int32_t address, std::span<char> output) {
+        return string_copy_(amx, static_cast<cell>(address), output);
+      };
+      if (!format.load(params[4], length, copy)) {
+        failure.error = SqlFormatError::string_read;
+        manager_.report_format_error("[Pawn.DB Warning] Unable to read SQL format string.");
+        return failure;
+      }
+      const auto available = static_cast<std::size_t>(count - 4);
+      const auto* args = reinterpret_cast<const std::int32_t*>(params + 5);
+      const auto snapshot = manager_.escape_snapshot(static_cast<std::uint32_t>(params[1]));
+      PawnStringScratch argument;
+      auto result = format_sql(format.view(), std::span(args, available),
+          [&](std::int32_t address) -> std::optional<std::string_view> {
+            return argument.load(address, length, copy)
+                       ? std::optional<std::string_view>(argument.view()) : std::nullopt;
+          }, snapshot.get());
+      if (result.error == SqlFormatError::stack_underflow) {
+        manager_.report_format_error("[Pawn.DB Error] Stack parameter underflow in format string: expected " +
+            std::to_string(result.expected) + " cells, got " + std::to_string(result.available) + " cells.");
+      } else if (result.error == SqlFormatError::too_large) {
+        manager_.report_format_error("[Pawn.DB Warning] SQL format exceeds the 65,536-byte limit.");
+      } else if (result.error == SqlFormatError::escape_failed) {
+        manager_.report_format_error("[Pawn.DB Warning] Driver SQL escaping failed.");
+      } else if (result.error != SqlFormatError::none) {
+        manager_.report_format_error("[Pawn.DB Warning] SQL formatting failed.");
+      }
+      return result;
+    } catch (...) {
+      failure.error = SqlFormatError::allocation_failure;
+      manager_.report_format_error("[Pawn.DB Warning] SQL formatting ran out of memory.");
+      return failure;
+    }
   }
 
  private:
@@ -142,6 +196,8 @@ class ConnectionNatives {
   Read read_;
   Write write_;
   UpdateAvailable update_available_;
+  StringLength string_length_;
+  StringCopy string_copy_;
   inline static ConnectionNatives* current_ = nullptr;
 };
 

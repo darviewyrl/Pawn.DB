@@ -3,7 +3,9 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <string>
 #include <thread>
+#include <vector>
 
 int main(int argc, char** argv) {
   if (pawndb::encode_sqlstate("28P01") <= 0 ||
@@ -47,7 +49,14 @@ int main(int argc, char** argv) {
         auto sessions = pawndb::PostgresPool::open(config, error);
         if (online && sessions) {
           pawndb::DriverError query_error;
-          passed = sessions->query("SELECT pg_sleep(0.2)", query_error) &&
+          const std::string input = "ไทย'; SELECT 1; --\\";
+          std::vector<char> escaped(input.size() * 2 + 1);
+          std::size_t escaped_size = 0;
+          passed = sessions->escape_string(input, escaped, escaped_size) &&
+                   std::string_view(escaped.data(), escaped_size).starts_with("ไทย") &&
+                   sessions->query("SELECT '" + std::string(escaped.data(), escaped_size) + "'",
+                                   query_error) &&
+                   sessions->query("SELECT pg_sleep(0.2)", query_error) &&
                    !sessions->query("INVALID SQL", query_error) &&
                    query_error.code == pawndb::encode_sqlstate("42601") &&
                    query_error.message.starts_with("[42601] ") &&

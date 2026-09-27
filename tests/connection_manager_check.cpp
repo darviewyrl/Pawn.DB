@@ -1,5 +1,6 @@
 #include <pawndb/connection_manager.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <filesystem>
@@ -157,10 +158,18 @@ int main() {
       std::atomic<int>& queries;
       std::vector<std::string>& statements;
       std::mutex& statements_mutex;
+      std::mutex& release_mutex;
+      std::vector<std::thread::id>& released_threads;
       NetworkPool(std::shared_ptr<std::atomic<bool>> state, std::atomic<int>& count,
-                  std::vector<std::string>& sql, std::mutex& sql_mutex)
+                  std::vector<std::string>& sql, std::mutex& sql_mutex,
+                  std::mutex& release_lock, std::vector<std::thread::id>& release_threads)
           : online(std::move(state)), queries(count), statements(sql),
-            statements_mutex(sql_mutex) {}
+            statements_mutex(sql_mutex), release_mutex(release_lock),
+            released_threads(release_threads) {}
+      ~NetworkPool() override {
+        std::lock_guard lock(release_mutex);
+        released_threads.push_back(std::this_thread::get_id());
+      }
       bool query(std::string_view sql, pawndb::DriverError& error) override {
         if (!online->load()) { error = {-4, "offline"}; return false; }
         ++queries;
@@ -173,19 +182,25 @@ int main() {
         return false;
       }
     };
+    std::mutex release_mutex;
+    std::vector<std::thread::id> released_escape_threads;
     pawndb::ConnectionManager reconnecting(life,
         [](void*, auto, int, std::string) {}, [](std::string) {},
-        [online, &queries, &statements, &statements_mutex](
+        [online, &queries, &statements, &statements_mutex, &release_mutex,
+         &released_escape_threads](
             const pawndb::ConnectionConfig&, pawndb::DriverError& error)
             -> std::shared_ptr<pawndb::SessionPool> {
           if (!online->load()) { error = {-4, "offline"}; return {}; }
-          return std::make_shared<NetworkPool>(online, queries, statements, statements_mutex);
+          return std::make_shared<NetworkPool>(online, queries, statements, statements_mutex,
+                                               release_mutex, released_escape_threads);
         });
     const auto recovered = reconnecting.connect(&script, direct);
     const auto connected_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (!reconnecting.is_connected(recovered) &&
            std::chrono::steady_clock::now() < connected_deadline) std::this_thread::yield();
     if (!reconnecting.is_connected(recovered)) return 1;
+    auto old_escape = reconnecting.escape_snapshot(recovered);
+    if (!old_escape) return 1;
     online->store(false);
     const auto disconnected_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
     while (reconnecting.is_connected(recovered) &&
@@ -203,8 +218,22 @@ int main() {
       life.dispatch_tick();
       std::this_thread::yield();
     }
+    auto new_escape = reconnecting.escape_snapshot(recovered);
     if (!query_done || !query_ok || !reconnecting.is_connected(recovered) || queries != 2 ||
-        !reconnecting.close(recovered)) return 1;
+        !new_escape || new_escape == old_escape) return 1;
+    new_escape.reset();
+    if (!reconnecting.close(recovered)) return 1;
+    old_escape.reset();
+    const auto cleanup_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < cleanup_deadline) {
+      { std::lock_guard lock(release_mutex); if (released_escape_threads.size() == 2) break; }
+      std::this_thread::yield();
+    }
+    { std::lock_guard lock(release_mutex);
+      if (released_escape_threads.size() != 2 || std::any_of(released_escape_threads.begin(),
+          released_escape_threads.end(), [](auto thread) { return thread == std::this_thread::get_id(); }))
+        return 1;
+    }
     {
       std::lock_guard lock(statements_mutex);
       if (statements != std::vector<std::string>{"SELECT retained", "SELECT retained callback"})
