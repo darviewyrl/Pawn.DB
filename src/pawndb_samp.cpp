@@ -131,7 +131,13 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data) {
         cell* source = nullptr;
         return get_addr(amx, address, &source) == AMX_ERR_NONE &&
                get_string(output.data(), source, 0, output.size()) == AMX_ERR_NONE;
-      }, invoke_callback);
+      }, invoke_callback, [](AMX* amx, cell address, cell value) {
+        if (!get_addr) return false;
+        cell* output = nullptr;
+        if (get_addr(amx, address, &output) != AMX_ERR_NONE) return false;
+        *output = value;
+        return true;
+      });
   return true;
 }
 

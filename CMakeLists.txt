@@ -157,6 +157,11 @@ target_include_directories(pawndb_connection_manager_check PRIVATE include)
 target_link_libraries(pawndb_connection_manager_check PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
 add_test(NAME connection_manager_check COMMAND pawndb_connection_manager_check)
 
+add_executable(pawndb_telemetry_check tests/telemetry_check.cpp)
+target_include_directories(pawndb_telemetry_check PRIVATE include)
+target_link_libraries(pawndb_telemetry_check PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+add_test(NAME telemetry_check COMMAND pawndb_telemetry_check)
+
 add_executable(pawndb_connection_natives_check tests/connection_natives_check.cpp)
 target_include_directories(pawndb_connection_natives_check PRIVATE
   include third_party/omp-pawn-compiler/source third_party/omp-pawn-compiler/source/linux)

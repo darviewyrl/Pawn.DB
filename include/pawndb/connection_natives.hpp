@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -27,17 +28,19 @@ class ConnectionNatives {
   using StringCopy = std::function<bool(AMX*, cell, std::span<char>)>;
   using Write = std::function<bool(AMX*, cell, std::string_view, std::size_t)>;
   using UpdateAvailable = std::function<bool()>;
+  using CellWrite = std::function<bool(AMX*, cell, cell)>;
   using CallbackArg = std::variant<cell, std::string>;
   using InvokeCallback = std::function<void(AMX*, std::string_view,
                                             const std::vector<CallbackArg>&)>;
 
   ConnectionNatives(ConnectionManager& manager, Read read, Write write,
                     UpdateAvailable update_available, StringLength string_length = {},
-                    StringCopy string_copy = {}, InvokeCallback invoke_callback = {})
+                    StringCopy string_copy = {}, InvokeCallback invoke_callback = {},
+                    CellWrite cell_write = {})
       : manager_(manager), read_(std::move(read)), write_(std::move(write)),
         update_available_(std::move(update_available)),
         string_length_(std::move(string_length)), string_copy_(std::move(string_copy)),
-        invoke_callback_(std::move(invoke_callback)) {
+        invoke_callback_(std::move(invoke_callback)), cell_write_(std::move(cell_write)) {
     current_ = this;
   }
   ~ConnectionNatives() { current_ = nullptr; }
@@ -51,12 +54,14 @@ class ConnectionNatives {
         {"pdb_setup_charset", setup_charset}, {"pdb_setup_option", setup_option},
         {"pdb_setup_driver", setup_driver}, {"pdb_setup_ssl", setup_ssl},
         {"pdb_is_update_available", is_update_available},
+        {"pdb_get_stat", get_stat}, {"pdb_get_metrics", get_metrics},
+        {"pdb_set_slow_query_threshold", set_slow_query_threshold},
         {"pdb_format", format}, {"pdb_execute", execute}, {"pdb_query", query},
         {nullptr, nullptr}};
     return natives;
   }
 
-  static constexpr int native_count = 16;
+  static constexpr int native_count = 19;
 
   SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
     return format_at(amx, params, 1, 4, 5);
@@ -258,6 +263,36 @@ class ConnectionNatives {
     return current_ && argc(params) == 0 && current_->update_available_();
   }
 
+  static cell AMX_NATIVE_CALL get_stat(AMX*, NativeParams params) {
+    if (!current_ || argc(params) != 2 || params[2] < 0 || params[2] > 3) return 0;
+    const auto metrics = current_->manager_.metrics(static_cast<std::uint32_t>(params[1]));
+    if (!metrics) return 0;
+    const std::uint64_t values[] = {metrics->qps, metrics->pending,
+                                    metrics->average_latency_us, metrics->slow_queries};
+    return static_cast<cell>(std::min<std::uint64_t>(
+        values[params[2]], static_cast<std::uint64_t>(std::numeric_limits<cell>::max())));
+  }
+
+  static cell AMX_NATIVE_CALL get_metrics(AMX* amx, NativeParams params) {
+    if (!current_ || argc(params) != 5 || !current_->cell_write_) return 0;
+    const auto metrics = current_->manager_.metrics(static_cast<std::uint32_t>(params[1]));
+    if (!metrics) return 0;
+    const std::uint64_t values[] = {metrics->qps, metrics->pending,
+                                    metrics->average_latency_us, metrics->slow_queries};
+    for (int i = 0; i < 4; ++i) {
+      const auto value = std::min<std::uint64_t>(
+          values[i], static_cast<std::uint64_t>(std::numeric_limits<cell>::max()));
+      if (!current_->cell_write_(amx, params[i + 2], static_cast<cell>(value))) return 0;
+    }
+    return 1;
+  }
+
+  static cell AMX_NATIVE_CALL set_slow_query_threshold(AMX*, NativeParams params) {
+    return current_ && argc(params) == 2 && params[2] >= 0 &&
+           current_->manager_.set_slow_query_threshold(
+               static_cast<std::uint32_t>(params[1]), static_cast<std::uint64_t>(params[2]));
+  }
+
   static cell AMX_NATIVE_CALL format(AMX* amx, NativeParams params) {
     if (!current_ || argc(params) < 4 || params[3] <= 0) return 0;
     try {
@@ -284,6 +319,7 @@ class ConnectionNatives {
   StringLength string_length_;
   StringCopy string_copy_;
   InvokeCallback invoke_callback_;
+  CellWrite cell_write_;
   inline static ConnectionNatives* current_ = nullptr;
 };
 

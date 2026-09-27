@@ -21,6 +21,13 @@ enum PDB_SETUP_OPT {
     PDB_OPT_POOL_SIZE
 }
 
+enum PDB_METRIC {
+    PDB_METRIC_QPS = 0,
+    PDB_METRIC_PENDING,
+    PDB_METRIC_AVG_LATENCY_US,
+    PDB_METRIC_SLOW_QUERIES
+}
+
 enum PDBJson {
     PDB_JSON_INVALID = 0
 }
@@ -41,6 +48,9 @@ native bool:pdb_setup_driver(PDBSetup:setup, PDB_DRIVER:driver);
 native bool:pdb_setup_ssl(PDBSetup:setup, const ca_cert[], const client_cert[] = "",
                           const client_key[] = "", bool:verify_server = true);
 native bool:pdb_is_update_available();
+native pdb_get_stat(PDB:handle, PDB_METRIC:metric_type);
+native bool:pdb_get_metrics(PDB:handle, &qps, &pending, &avg_latency_us, &slow_queries);
+native bool:pdb_set_slow_query_threshold(PDB:handle, threshold_us);
 
 native pdb_format(PDB:handle, output[], max_len = sizeof(output), const format[],
                   {Float, PDBJson, _}:...);

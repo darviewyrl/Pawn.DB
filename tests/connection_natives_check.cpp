@@ -1,6 +1,7 @@
 #include <pawndb/connection_natives.hpp>
 
 #include <cstring>
+#include <unordered_map>
 #include <string>
 
 int main() {
@@ -13,6 +14,7 @@ int main() {
   std::string output;
   std::size_t output_capacity = 0;
   int argument_reads = 0;
+  std::unordered_map<cell, cell> references;
   pawndb::ConnectionNatives natives(manager,
       [](AMX*, cell address, std::string& value) {
         switch (address) {
@@ -47,6 +49,9 @@ int main() {
         if (value.empty() || output.size() < value.size() + 1) return false;
         std::memcpy(output.data(), value.data(), value.size());
         output[value.size()] = '\0';
+        return true;
+      }, {}, [&](AMX*, cell address, cell value) {
+        references[address] = value;
         return true;
       });
   const auto* table = pawndb::ConnectionNatives::table();
@@ -85,6 +90,13 @@ int main() {
   cell driver_name[] = {3 * sizeof(cell), handle, 9, 32};
   if (!native("pdb_get_driver_name")(&amx, driver_name) ||
       std::string(output.c_str()) != "PostgreSQL") return 1;
+  cell threshold[] = {2 * sizeof(cell), handle, 50000};
+  cell metrics[] = {5 * sizeof(cell), handle, 101, 102, 103, 104};
+  cell stat[] = {2 * sizeof(cell), handle, 0};
+  if (!native("pdb_set_slow_query_threshold")(&amx, threshold) ||
+      native("pdb_get_stat")(&amx, stat) != 0 ||
+      !native("pdb_get_metrics")(&amx, metrics) || references[101] || references[102] ||
+      references[103] || references[104]) return 1;
   const cell format_1024[] = {5 * sizeof(cell), handle, 88, 64, 12, 13};
   if (native("pdb_format")(&amx, format_1024) != 63 || output.size() != 64 ||
       output[63] != '\0' || output_capacity != 64) return 1;

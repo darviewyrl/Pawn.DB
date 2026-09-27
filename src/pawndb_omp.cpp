@@ -168,6 +168,13 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
           if (pushed) it->second->Exec(&result, index);
           for (auto address = strings.rbegin(); address != strings.rend(); ++address)
             it->second->Release(*address);
+        }, [this](AMX* amx, cell address, cell value) {
+          auto it = scripts_.find(amx);
+          cell* output = nullptr;
+          if (it == scripts_.end() || it->second->GetAddr(address, &output) != AMX_ERR_NONE)
+            return false;
+          *output = value;
+          return true;
         });
   }
 

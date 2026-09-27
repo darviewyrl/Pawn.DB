@@ -36,6 +36,13 @@ struct PendingQuery {
   std::uint32_t handle;
 };
 
+struct ConnectionMetrics {
+  std::uint64_t qps = 0;
+  std::uint64_t pending = 0;
+  std::uint64_t average_latency_us = 0;
+  std::uint64_t slow_queries = 0;
+};
+
 struct Connection {
   explicit Connection(void* script) : owner(script) {}
   void* owner;
@@ -47,6 +54,12 @@ struct Connection {
   std::atomic<std::shared_ptr<const EscapeSnapshot>> escape_context;
   std::deque<PendingQuery> pending_queries;
   bool draining_queries = false;
+  std::mutex metrics_mutex;
+  std::deque<std::chrono::steady_clock::time_point> successful_queries;
+  std::atomic<std::uint64_t> completed_queries{0};
+  std::atomic<std::uint64_t> total_latency_us{0};
+  std::atomic<std::uint64_t> slow_query_threshold_us{0};
+  std::atomic<std::uint64_t> slow_queries{0};
 
   void set_config(ConnectionConfig next) {
     std::lock_guard lock(mutex);
@@ -286,6 +299,37 @@ class ConnectionManager {
     return connection && connection->state == ConnectionState::connected;
   }
 
+  std::optional<ConnectionMetrics> metrics(Handle handle) const {
+    auto connection = handles_.get<Connection>(handle);
+    if (!connection) return std::nullopt;
+    ConnectionMetrics result;
+    {
+      std::lock_guard lock(connection->mutex);
+      result.pending = connection->pending_queries.size();
+    }
+    {
+      std::lock_guard lock(connection->metrics_mutex);
+      const auto cutoff = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+      while (!connection->successful_queries.empty() &&
+             connection->successful_queries.front() < cutoff)
+        connection->successful_queries.pop_front();
+      result.qps = connection->successful_queries.size();
+    }
+    const auto completed = connection->completed_queries.load(std::memory_order_relaxed);
+    if (completed)
+      result.average_latency_us = connection->total_latency_us.load(std::memory_order_relaxed) /
+                                  completed;
+    result.slow_queries = connection->slow_queries.load(std::memory_order_relaxed);
+    return result;
+  }
+
+  bool set_slow_query_threshold(Handle handle, std::uint64_t threshold_us) {
+    auto connection = handles_.get<Connection>(handle);
+    if (!connection) return false;
+    connection->slow_query_threshold_us.store(threshold_us, std::memory_order_relaxed);
+    return true;
+  }
+
   std::shared_ptr<const EscapeSnapshot> escape_snapshot(Handle handle) const {
     auto connection = handles_.get<Connection>(handle);
     return connection ? connection->escape_context.load(std::memory_order_acquire) : nullptr;
@@ -430,9 +474,25 @@ class ConnectionManager {
     }
     DriverError error;
     bool ok = false;
+    const auto started = std::chrono::steady_clock::now();
     try { ok = sessions && sessions->query(query.sql, error); }
     catch (const std::exception& exception) { error = {-4, exception.what()}; }
     catch (...) { error = {-4, "internal query failure"}; }
+    const auto finished = std::chrono::steady_clock::now();
+    const auto latency_us = static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::microseconds>(finished - started).count());
+    connection->completed_queries.fetch_add(1, std::memory_order_relaxed);
+    connection->total_latency_us.fetch_add(latency_us, std::memory_order_relaxed);
+    const auto threshold = connection->slow_query_threshold_us.load(std::memory_order_relaxed);
+    if (threshold && latency_us >= threshold)
+      connection->slow_queries.fetch_add(1, std::memory_order_relaxed);
+    if (ok) {
+      std::lock_guard lock(connection->metrics_mutex);
+      connection->successful_queries.push_back(finished);
+      const auto cutoff = finished - std::chrono::seconds(1);
+      while (connection->successful_queries.front() < cutoff)
+        connection->successful_queries.pop_front();
+    }
     if (!ok) {
       DriverError ping_error;
       bool healthy = false;
