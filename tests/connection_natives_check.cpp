@@ -11,6 +11,7 @@ int main() {
   pawndb::ConnectionManager manager(life, [](void*, auto, int, std::string) {},
                                     [](std::string) {});
   std::string output;
+  std::size_t output_capacity = 0;
   int argument_reads = 0;
   pawndb::ConnectionNatives natives(manager,
       [](AMX*, cell address, std::string& value) {
@@ -21,22 +22,28 @@ int main() {
           case 4: value = "test"; return true;
           case 5: value = "utf8mb4"; return true;
           case 6: value = "ca.pem"; return true;
+          case 12: value = "%s"; return true;
+          case 13: value = std::string(1024, 'x'); return true;
           default: return false;
         }
       }, [&](AMX*, cell, std::string_view value, std::size_t capacity) {
+        output_capacity = capacity;
         output = value.substr(0, capacity - 1);
+        output.push_back('\0');
         return true;
       }, [] { return true; }, [&](AMX*, cell address, std::size_t& length) {
         if (address == 11) ++argument_reads;
-        const std::string_view value = address == 10 ? "SELECT %d, %s" :
-                                       address == 11 ? "hello" : "";
+        const std::string value = address == 10 ? "SELECT %d, %s" :
+                                  address == 11 ? "hello" : address == 12 ? "%s" :
+                                  address == 13 ? std::string(1024, 'x') : "";
         if (value.empty()) return false;
         length = value.size();
         return true;
       }, [&](AMX*, cell address, std::span<char> output) {
         if (address == 11) ++argument_reads;
-        const std::string_view value = address == 10 ? "SELECT %d, %s" :
-                                       address == 11 ? "hello" : "";
+        const std::string value = address == 10 ? "SELECT %d, %s" :
+                                  address == 11 ? "hello" : address == 12 ? "%s" :
+                                  address == 13 ? std::string(1024, 'x') : "";
         if (value.empty() || output.size() < value.size() + 1) return false;
         std::memcpy(output.data(), value.data(), value.size());
         output[value.size()] = '\0';
@@ -76,7 +83,11 @@ int main() {
   cell one[] = {sizeof(cell), handle};
   if (native("pdb_is_connected")(&amx, one)) return 1;
   cell driver_name[] = {3 * sizeof(cell), handle, 9, 32};
-  if (!native("pdb_get_driver_name")(&amx, driver_name) || output != "PostgreSQL") return 1;
+  if (!native("pdb_get_driver_name")(&amx, driver_name) ||
+      std::string(output.c_str()) != "PostgreSQL") return 1;
+  const cell format_1024[] = {5 * sizeof(cell), handle, 88, 64, 12, 13};
+  if (native("pdb_format")(&amx, format_1024) != 63 || output.size() != 64 ||
+      output[63] != '\0' || output_capacity != 64) return 1;
   cell free_setup[] = {sizeof(cell), setup};
   if (native("pdb_setup_charset")(&amx, charset) ||
       native("pdb_setup_free")(&amx, free_setup)) return 1;

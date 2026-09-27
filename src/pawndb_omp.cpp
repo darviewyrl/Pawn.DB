@@ -77,7 +77,8 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
   void onTick(Microseconds, TimePoint) override { lifecycle_.dispatch_tick(); }
   void onAmxLoad(IPawnScript& script) override {
     if (scripts_.contains(script.GetAMX())) return;
-    if (natives_ && script.Register(pawndb::ConnectionNatives::table(), 13) == AMX_ERR_NONE &&
+    if (natives_ && script.Register(pawndb::ConnectionNatives::table(),
+                                    pawndb::ConnectionNatives::native_count) == AMX_ERR_NONE &&
         lifecycle_.attach(script.GetAMX())) {
       scripts_[script.GetAMX()] = &script;
       update_checker_.start(lifecycle_, [this](std::string message) {

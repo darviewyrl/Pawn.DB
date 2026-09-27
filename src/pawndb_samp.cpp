@@ -123,7 +123,8 @@ PLUGIN_EXPORT void PLUGIN_CALL ProcessTick() { lifecycle.dispatch_tick(); }
 
 PLUGIN_EXPORT int PLUGIN_CALL AmxLoad(AMX* amx) {
   if (!amx || !register_natives) return AMX_ERR_PARAMS;
-  const int result = register_natives(amx, pawndb::ConnectionNatives::table(), 13);
+  const int result = register_natives(amx, pawndb::ConnectionNatives::table(),
+                                      pawndb::ConnectionNatives::native_count);
   if (result == AMX_ERR_NONE && lifecycle.attach(amx)) {
     update_checker.start(lifecycle, [](std::string message) {
       if (logprintf) logprintf(const_cast<char*>("%s"), message.c_str());

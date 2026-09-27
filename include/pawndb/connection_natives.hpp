@@ -4,6 +4,7 @@
 #include <pawndb/sql_formatter.hpp>
 #include <amx/amx.h>
 
+#include <algorithm>
 #include <functional>
 #include <span>
 #include <string>
@@ -44,15 +45,22 @@ class ConnectionNatives {
         {"pdb_setup_charset", setup_charset}, {"pdb_setup_option", setup_option},
         {"pdb_setup_driver", setup_driver}, {"pdb_setup_ssl", setup_ssl},
         {"pdb_is_update_available", is_update_available},
+        {"pdb_format", format},
         {nullptr, nullptr}};
     return natives;
   }
 
   SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
+    return format_at(amx, params, 1, 4, 5);
+  }
+
+ private:
+  SqlFormatResult format_at(AMX* amx, NativeParams params, int handle_index,
+                            int format_index, int first_variadic) const {
     const int count = argc(params);
     SqlFormatResult failure;
     failure.error = SqlFormatError::malformed;
-    if (!amx || count < 4 || !string_length_ || !string_copy_) {
+    if (!amx || count < first_variadic - 1 || !string_length_ || !string_copy_) {
       manager_.report_format_error("[Pawn.DB Warning] Invalid SQL format arguments.");
       return failure;
     }
@@ -64,14 +72,14 @@ class ConnectionNatives {
       const auto copy = [this, amx](std::int32_t address, std::span<char> output) {
         return string_copy_(amx, static_cast<cell>(address), output);
       };
-      if (!format.load(params[4], length, copy)) {
+      if (!format.load(params[format_index], length, copy)) {
         failure.error = SqlFormatError::string_read;
         manager_.report_format_error("[Pawn.DB Warning] Unable to read SQL format string.");
         return failure;
       }
-      const auto available = static_cast<std::size_t>(count - 4);
-      const auto* args = reinterpret_cast<const std::int32_t*>(params + 5);
-      const auto snapshot = manager_.escape_snapshot(static_cast<std::uint32_t>(params[1]));
+      const auto available = static_cast<std::size_t>(count - first_variadic + 1);
+      const auto* args = reinterpret_cast<const std::int32_t*>(params + first_variadic);
+      const auto snapshot = manager_.escape_snapshot(static_cast<std::uint32_t>(params[handle_index]));
       PawnStringScratch argument;
       auto result = format_sql(format.view(), std::span(args, available),
           [&](std::int32_t address) -> std::optional<std::string_view> {
@@ -190,6 +198,19 @@ class ConnectionNatives {
 
   static cell AMX_NATIVE_CALL is_update_available(AMX*, NativeParams params) {
     return current_ && argc(params) == 0 && current_->update_available_();
+  }
+
+  static constexpr int native_count = 14;
+
+  static cell AMX_NATIVE_CALL format(AMX* amx, NativeParams params) {
+    if (!current_ || argc(params) < 4 || params[3] <= 0) return 0;
+    try {
+      auto result = current_->format_at(amx, params, 1, 4, 5);
+      const auto capacity = static_cast<std::size_t>(params[3]);
+      const std::string_view output = result ? result.sql.view() : std::string_view("");
+      if (!current_->write_(amx, params[2], output, capacity)) return 0;
+      return static_cast<cell>(result ? std::min(output.size(), capacity - 1) : 0);
+    } catch (...) { return 0; }
   }
 
   ConnectionManager& manager_;
