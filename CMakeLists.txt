@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 cmake_policy(SET CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 project(PawnDB LANGUAGES C CXX)
+find_package(Threads REQUIRED)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -74,6 +75,7 @@ target_include_directories(pawndb_dependencies INTERFACE
   third_party/mariadb-connector-c/include
   "${PROJECT_BINARY_DIR}/third_party/mariadb-connector-c/include")
 target_link_libraries(pawndb_dependencies INTERFACE
+  Threads::Threads
   mariadbclient
   "${PAWNDB_LIBPQ_STATIC_LIBRARY}"
   ${PAWNDB_LIBPQ_EXTRA_LIBRARIES}
@@ -123,17 +125,22 @@ add_test(NAME linkage_check COMMAND pawndb_linkage_check)
 
 add_executable(pawndb_lifecycle_check tests/lifecycle_check.cpp)
 target_include_directories(pawndb_lifecycle_check PRIVATE include)
+target_link_libraries(pawndb_lifecycle_check PRIVATE Threads::Threads)
 add_test(NAME lifecycle_check COMMAND pawndb_lifecycle_check)
 
 add_executable(pawndb_handle_registry_check tests/handle_registry_check.cpp)
 target_include_directories(pawndb_handle_registry_check PRIVATE include)
 add_test(NAME handle_registry_check COMMAND pawndb_handle_registry_check)
 
-find_package(Threads REQUIRED)
 add_executable(pawndb_worker_pool_check tests/worker_pool_check.cpp)
 target_include_directories(pawndb_worker_pool_check PRIVATE include)
 target_link_libraries(pawndb_worker_pool_check PRIVATE Threads::Threads)
 add_test(NAME worker_pool_check COMMAND pawndb_worker_pool_check)
+
+add_executable(pawndb_dispatch_check tests/dispatch_check.cpp)
+target_include_directories(pawndb_dispatch_check PRIVATE include)
+target_link_libraries(pawndb_dispatch_check PRIVATE Threads::Threads)
+add_test(NAME dispatch_check COMMAND pawndb_dispatch_check)
 
 if(WIN32)
   add_executable(pawndb_omp_entry_check tests/omp_entry_check.cpp)
