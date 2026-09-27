@@ -96,7 +96,7 @@ foreach(target IN ITEMS pawndb_omp pawndb_samp)
     target_include_directories(${target} PRIVATE
       third_party/omp-pawn-compiler/source
       third_party/omp-pawn-compiler/source/linux)
-    target_compile_definitions(${target} PRIVATE HAVE_STDINT_H=1 PAWN_CELL_SIZE=32)
+    target_compile_definitions(${target} PRIVATE HAVE_STDINT_H=1 PAWN_CELL_SIZE=32 PAWNDB_OMP=1)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SIZEOF_VOID_P EQUAL 8)
       target_compile_options(${target} PRIVATE -Wno-attributes) # open.mp SDK marks x64 declarations cdecl.
     endif()
@@ -141,6 +141,24 @@ add_executable(pawndb_dispatch_check tests/dispatch_check.cpp)
 target_include_directories(pawndb_dispatch_check PRIVATE include)
 target_link_libraries(pawndb_dispatch_check PRIVATE Threads::Threads)
 add_test(NAME dispatch_check COMMAND pawndb_dispatch_check)
+
+add_executable(pawndb_connection_config_check tests/connection_config_check.cpp)
+target_include_directories(pawndb_connection_config_check PRIVATE include)
+target_link_libraries(pawndb_connection_config_check PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME connection_config_check COMMAND pawndb_connection_config_check)
+
+add_executable(pawndb_connection_manager_check tests/connection_manager_check.cpp)
+target_include_directories(pawndb_connection_manager_check PRIVATE include)
+target_link_libraries(pawndb_connection_manager_check PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+add_test(NAME connection_manager_check COMMAND pawndb_connection_manager_check)
+
+add_executable(pawndb_connection_natives_check tests/connection_natives_check.cpp)
+target_include_directories(pawndb_connection_natives_check PRIVATE
+  include third_party/omp-pawn-compiler/source third_party/omp-pawn-compiler/source/linux)
+target_compile_definitions(pawndb_connection_natives_check PRIVATE
+  HAVE_STDINT_H=1 PAWN_CELL_SIZE=32 PAWNDB_OMP=1)
+target_link_libraries(pawndb_connection_natives_check PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+add_test(NAME connection_natives_check COMMAND pawndb_connection_natives_check)
 
 if(WIN32)
   add_executable(pawndb_omp_entry_check tests/omp_entry_check.cpp)

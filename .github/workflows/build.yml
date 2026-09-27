@@ -10,12 +10,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Check worker pool with TSan
         run: |
           g++ -std=c++20 -pthread -fsanitize=thread -fPIE -pie -g -Iinclude tests/worker_pool_check.cpp -o worker_pool_tsan
           ./worker_pool_tsan
           g++ -std=c++20 -pthread -fsanitize=thread -fPIE -pie -g -Iinclude tests/dispatch_check.cpp -o dispatch_tsan
           ./dispatch_tsan
+          g++ -std=c++20 -pthread -fsanitize=thread -fPIE -pie -g -Iinclude -Ithird_party/json/include tests/connection_manager_check.cpp -o connection_manager_tsan
+          ./connection_manager_tsan
   build:
     name: ${{ matrix.target }} ${{ matrix.os }} ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
