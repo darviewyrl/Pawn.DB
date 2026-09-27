@@ -160,6 +160,10 @@ target_compile_definitions(pawndb_connection_natives_check PRIVATE
 target_link_libraries(pawndb_connection_natives_check PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
 add_test(NAME connection_natives_check COMMAND pawndb_connection_natives_check)
 
+add_executable(pawndb_mariadb_session_check tests/mariadb_session_check.cpp)
+target_link_libraries(pawndb_mariadb_session_check PRIVATE pawndb_dependencies)
+add_test(NAME mariadb_session_check COMMAND pawndb_mariadb_session_check)
+
 if(WIN32)
   add_executable(pawndb_omp_entry_check tests/omp_entry_check.cpp)
   target_link_libraries(pawndb_omp_entry_check PRIVATE OMP-SDK)

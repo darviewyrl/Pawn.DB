@@ -116,6 +116,13 @@ class WorkerPool {
     return true;
   }
 
+  void defer_cleanup(std::size_t index, Work work) {
+    auto& worker = *workers_[index];
+    worker.cleanup.push(std::move(work));
+    worker.wake.fetch_add(1, std::memory_order_release);
+    worker.wake.notify_one();
+  }
+
   void publish(Work result) {
     if (result) completed_.push(std::move(result));
   }
@@ -134,6 +141,7 @@ class WorkerPool {
   struct Worker {
     SpscQueue<> high;
     SpscQueue<> normal;
+    MpscQueue cleanup;
     std::atomic<unsigned> wake{0};
   };
 
@@ -142,6 +150,7 @@ class WorkerPool {
       const auto wake = worker.wake.load(std::memory_order_acquire);
       if (auto work = worker.high.pop()) { work(); continue; }
       if (auto work = worker.normal.pop()) { work(); continue; }
+      if (auto work = worker.cleanup.pop()) { work(); continue; }
       if (stopping_.load(std::memory_order_acquire)) break;
       worker.wake.wait(wake, std::memory_order_acquire);
     }

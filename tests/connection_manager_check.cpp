@@ -1,7 +1,9 @@
 #include <pawndb/connection_manager.hpp>
 
 #include <chrono>
+#include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 
 int main() {
@@ -36,5 +38,56 @@ int main() {
   manager.detach(&other);
   life.detach(&other);
   if (manager.is_connected(handle) || warnings < 2) return 1;
+  std::atomic<bool> released = false;
+  std::thread::id released_thread;
+  struct FakePool final : pawndb::SessionPool {
+    std::atomic<bool>& released;
+    std::thread::id& released_thread;
+    FakePool(std::atomic<bool>& value, std::thread::id& thread)
+        : released(value), released_thread(thread) {}
+    ~FakePool() override { released_thread = std::this_thread::get_id(); released = true; }
+    bool query(std::string_view, pawndb::DriverError&) override { return true; }
+  };
+  {
+    pawndb::ConnectionManager live(life, [](void*, auto, int, std::string) {},
+                                   [](std::string) {},
+                                   [&](const pawndb::ConnectionConfig&, pawndb::DriverError&)
+                                       -> std::shared_ptr<pawndb::SessionPool> {
+                                     return std::make_shared<FakePool>(released, released_thread);
+                                   });
+    handle = live.connect(&script, direct);
+    const auto connect_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!live.is_connected(handle) && std::chrono::steady_clock::now() < connect_deadline)
+      std::this_thread::yield();
+    if (!live.is_connected(handle) || !live.close(handle)) return 1;
+    const auto valid = std::filesystem::current_path() / "pdb_valid_config.json";
+    { std::ofstream file(valid); file << pawndb::default_config_json(); }
+    handle = live.connect_file(&script, valid.string());
+    const auto file_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!live.is_connected(handle) && std::chrono::steady_clock::now() < file_deadline)
+      std::this_thread::yield();
+    std::filesystem::remove(valid);
+    if (!live.is_connected(handle) || !live.close(handle)) return 1;
+  }
+  int driver_errors = 0;
+  {
+    pawndb::ConnectionManager failed(life,
+        [&](void* amx, auto, int code, std::string message) {
+          if (amx == &script && code == 1045 && message == "access denied") ++driver_errors;
+        }, [](std::string) {},
+        [](const pawndb::ConnectionConfig&, pawndb::DriverError& error)
+            -> std::shared_ptr<pawndb::SessionPool> {
+          error = {1045, "access denied"};
+          return {};
+        });
+    handle = failed.connect(&script, direct);
+    const auto error_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!driver_errors && std::chrono::steady_clock::now() < error_deadline) {
+      life.dispatch_tick();
+      std::this_thread::yield();
+    }
+    if (driver_errors != 1 || failed.is_connected(handle) || !failed.close(handle)) return 1;
+  }
   life.stop();
+  if (!released || released_thread == std::this_thread::get_id()) return 1;
 }

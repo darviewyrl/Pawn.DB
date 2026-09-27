@@ -1,5 +1,6 @@
 #include <pawndb/lifecycle.hpp>
 #include <pawndb/connection_natives.hpp>
+#include <pawndb/mariadb_pool.hpp>
 #include <sdk.hpp>
 #include <Server/Components/Pawn/pawn.hpp>
 
@@ -87,7 +88,7 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
           onConnectionError(static_cast<AMX*>(amx), handle, code, message);
         }, [this](std::string message) {
           core_->logLn(LogLevel::Warning, "%s", message.c_str());
-        });
+        }, pawndb::MariaPool::open);
     natives_ = std::make_unique<pawndb::ConnectionNatives>(
         *connections_,
         [this](AMX* amx, cell address, std::string& value) {

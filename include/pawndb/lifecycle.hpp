@@ -42,6 +42,7 @@ class Lifecycle {
     if (!pool_) pool_ = std::make_unique<WorkerPool>();
     return pool_.get();
   }
+  WorkerPool* active_worker_pool() const noexcept { return pool_.get(); }
   void dispatch_tick() {
     if (!running_ || !pool_ || std::this_thread::get_id() != main_thread_) return;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
