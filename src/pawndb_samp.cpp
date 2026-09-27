@@ -2,6 +2,7 @@
 #include <pawndb/connection_natives.hpp>
 #include <pawndb/mariadb_pool.hpp>
 #include <pawndb/postgres_pool.hpp>
+#include <pawndb/update_checker.hpp>
 #include <plugincommon.h>
 #include <amx/amx.h>
 
@@ -11,6 +12,7 @@
 namespace {
 
 pawndb::Lifecycle lifecycle;
+pawndb::UpdateChecker update_checker;
 decltype(&amx_Register) register_natives = nullptr;
 decltype(&amx_GetAddr) get_addr = nullptr;
 decltype(&amx_StrLen) str_len = nullptr;
@@ -90,7 +92,7 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data) {
         if (get_addr(amx, address, &output) != AMX_ERR_NONE) return false;
         const std::string truncated(value.substr(0, capacity - 1));
         return set_string(output, truncated.c_str(), 0, 0, capacity) == AMX_ERR_NONE;
-      });
+      }, [] { return update_checker.available(); });
   return true;
 }
 
@@ -98,6 +100,7 @@ PLUGIN_EXPORT void PLUGIN_CALL Unload() {
   natives.reset();
   connections.reset();
   lifecycle.stop();
+  update_checker.stop();
   register_natives = nullptr;
 }
 
@@ -105,8 +108,12 @@ PLUGIN_EXPORT void PLUGIN_CALL ProcessTick() { lifecycle.dispatch_tick(); }
 
 PLUGIN_EXPORT int PLUGIN_CALL AmxLoad(AMX* amx) {
   if (!amx || !register_natives) return AMX_ERR_PARAMS;
-  const int result = register_natives(amx, pawndb::ConnectionNatives::table(), 12);
-  if (result == AMX_ERR_NONE) lifecycle.attach(amx);
+  const int result = register_natives(amx, pawndb::ConnectionNatives::table(), 13);
+  if (result == AMX_ERR_NONE && lifecycle.attach(amx)) {
+    update_checker.start(lifecycle, [](std::string message) {
+      if (logprintf) logprintf(const_cast<char*>("%s"), message.c_str());
+    });
+  }
   return result;
 }
 

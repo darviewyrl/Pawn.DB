@@ -24,7 +24,7 @@ int main() {
       }, [&](AMX*, cell, std::string_view value, std::size_t capacity) {
         output = value.substr(0, capacity - 1);
         return true;
-      });
+      }, [] { return true; });
   const auto* table = pawndb::ConnectionNatives::table();
   auto native = [table](const char* name) {
     for (auto* item = table; item->name; ++item)
@@ -32,6 +32,8 @@ int main() {
     return static_cast<AMX_NATIVE>(nullptr);
   };
   const cell init[] = {0};
+  cell no_args[] = {0};
+  if (!native("pdb_is_update_available")(&amx, no_args)) return 1;
   const cell setup = native("pdb_setup_init")(&amx, init);
   if (!setup) return 1;
   cell charset[] = {2 * sizeof(cell), setup, 5};

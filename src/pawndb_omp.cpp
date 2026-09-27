@@ -2,6 +2,7 @@
 #include <pawndb/connection_natives.hpp>
 #include <pawndb/mariadb_pool.hpp>
 #include <pawndb/postgres_pool.hpp>
+#include <pawndb/update_checker.hpp>
 #include <sdk.hpp>
 #include <Server/Components/Pawn/pawn.hpp>
 
@@ -16,7 +17,9 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
  public:
   UID getUID() override { return kPawnDbUid; }
   StringView componentName() const override { return "Pawn.DB"; }
-  SemanticVersion componentVersion() const override { return {0, 0, 0, 0}; }
+  SemanticVersion componentVersion() const override {
+    return {pawndb::kVersionMajor, pawndb::kVersionMinor, pawndb::kVersionPatch, 0};
+  }
 
   void onLoad(ICore* core) override {
     core_ = core;
@@ -46,7 +49,8 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
     natives_.reset();
     connections_.reset();
     scripts_.clear();
-    lifecycle_.stop();
+      lifecycle_.stop();
+      update_checker_.stop();
   }
 
   void free() override {
@@ -56,6 +60,7 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
     connections_.reset();
     scripts_.clear();
     lifecycle_.stop();
+    update_checker_.stop();
     delete this;
   }
 
@@ -64,6 +69,7 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
     connections_.reset();
     scripts_.clear();
     lifecycle_.stop();
+    update_checker_.stop();
     lifecycle_.start();
     initApi();
   }
@@ -71,9 +77,12 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
   void onTick(Microseconds, TimePoint) override { lifecycle_.dispatch_tick(); }
   void onAmxLoad(IPawnScript& script) override {
     if (scripts_.contains(script.GetAMX())) return;
-    if (natives_ && script.Register(pawndb::ConnectionNatives::table(), 12) == AMX_ERR_NONE) {
-      lifecycle_.attach(script.GetAMX());
+    if (natives_ && script.Register(pawndb::ConnectionNatives::table(), 13) == AMX_ERR_NONE &&
+        lifecycle_.attach(script.GetAMX())) {
       scripts_[script.GetAMX()] = &script;
+      update_checker_.start(lifecycle_, [this](std::string message) {
+        if (core_) core_->logLn(LogLevel::Message, "%s", message.c_str());
+      });
     }
   }
   void onAmxUnload(IPawnScript& script) override {
@@ -117,7 +126,7 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
           const auto truncated = value.substr(0, capacity - 1);
           return it->second->SetString(output, StringView(truncated.data(), truncated.size()),
                                        false, false, capacity) == AMX_ERR_NONE;
-        });
+        }, [this] { return update_checker_.available(); });
   }
 
   void onConnectionError(AMX* amx, pawndb::ConnectionManager::Handle handle,
@@ -140,6 +149,7 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
   pawndb::Lifecycle lifecycle_;
   std::unique_ptr<pawndb::ConnectionManager> connections_;
   std::unique_ptr<pawndb::ConnectionNatives> natives_;
+  pawndb::UpdateChecker update_checker_;
   std::unordered_map<AMX*, IPawnScript*> scripts_;
 };
 

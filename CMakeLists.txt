@@ -137,6 +137,11 @@ target_include_directories(pawndb_worker_pool_check PRIVATE include)
 target_link_libraries(pawndb_worker_pool_check PRIVATE Threads::Threads)
 add_test(NAME worker_pool_check COMMAND pawndb_worker_pool_check)
 
+add_executable(pawndb_update_checker_check tests/update_checker_check.cpp)
+target_include_directories(pawndb_update_checker_check PRIVATE include
+  third_party/curl/include third_party/json/include)
+add_test(NAME update_checker_check COMMAND pawndb_update_checker_check)
+
 add_executable(pawndb_dispatch_check tests/dispatch_check.cpp)
 target_include_directories(pawndb_dispatch_check PRIVATE include)
 target_link_libraries(pawndb_dispatch_check PRIVATE Threads::Threads)

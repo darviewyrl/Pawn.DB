@@ -19,9 +19,12 @@ class ConnectionNatives {
  public:
   using Read = std::function<bool(AMX*, cell, std::string&)>;
   using Write = std::function<bool(AMX*, cell, std::string_view, std::size_t)>;
+  using UpdateAvailable = std::function<bool()>;
 
-  ConnectionNatives(ConnectionManager& manager, Read read, Write write)
-      : manager_(manager), read_(std::move(read)), write_(std::move(write)) {
+  ConnectionNatives(ConnectionManager& manager, Read read, Write write,
+                    UpdateAvailable update_available)
+      : manager_(manager), read_(std::move(read)), write_(std::move(write)),
+        update_available_(std::move(update_available)) {
     current_ = this;
   }
   ~ConnectionNatives() { current_ = nullptr; }
@@ -34,6 +37,7 @@ class ConnectionNatives {
         {"pdb_setup_init", setup_init}, {"pdb_setup_free", setup_free},
         {"pdb_setup_charset", setup_charset}, {"pdb_setup_option", setup_option},
         {"pdb_setup_driver", setup_driver}, {"pdb_setup_ssl", setup_ssl},
+        {"pdb_is_update_available", is_update_available},
         {nullptr, nullptr}};
     return natives;
   }
@@ -130,9 +134,14 @@ class ConnectionNatives {
     return current_->write_(amx, params[2], *name, static_cast<std::size_t>(params[3]));
   }
 
+  static cell AMX_NATIVE_CALL is_update_available(AMX*, NativeParams params) {
+    return current_ && argc(params) == 0 && current_->update_available_();
+  }
+
   ConnectionManager& manager_;
   Read read_;
   Write write_;
+  UpdateAvailable update_available_;
   inline static ConnectionNatives* current_ = nullptr;
 };
 
