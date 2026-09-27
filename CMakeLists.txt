@@ -125,6 +125,10 @@ add_executable(pawndb_lifecycle_check tests/lifecycle_check.cpp)
 target_include_directories(pawndb_lifecycle_check PRIVATE include)
 add_test(NAME lifecycle_check COMMAND pawndb_lifecycle_check)
 
+add_executable(pawndb_handle_registry_check tests/handle_registry_check.cpp)
+target_include_directories(pawndb_handle_registry_check PRIVATE include)
+add_test(NAME handle_registry_check COMMAND pawndb_handle_registry_check)
+
 if(WIN32)
   add_executable(pawndb_omp_entry_check tests/omp_entry_check.cpp)
   target_link_libraries(pawndb_omp_entry_check PRIVATE OMP-SDK)
