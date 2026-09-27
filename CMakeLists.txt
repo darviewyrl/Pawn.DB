@@ -164,6 +164,10 @@ add_executable(pawndb_mariadb_session_check tests/mariadb_session_check.cpp)
 target_link_libraries(pawndb_mariadb_session_check PRIVATE pawndb_dependencies)
 add_test(NAME mariadb_session_check COMMAND pawndb_mariadb_session_check)
 
+add_executable(pawndb_postgres_session_check tests/postgres_session_check.cpp)
+target_link_libraries(pawndb_postgres_session_check PRIVATE pawndb_dependencies)
+add_test(NAME postgres_session_check COMMAND pawndb_postgres_session_check)
+
 if(WIN32)
   add_executable(pawndb_omp_entry_check tests/omp_entry_check.cpp)
   target_link_libraries(pawndb_omp_entry_check PRIVATE OMP-SDK)

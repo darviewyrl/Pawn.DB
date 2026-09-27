@@ -68,6 +68,15 @@ int main() {
       std::this_thread::yield();
     std::filesystem::remove(valid);
     if (!live.is_connected(handle) || !live.close(handle)) return 1;
+    auto postgres = direct;
+    postgres.backend = pawndb::Backend::postgres;
+    postgres.port = 5432;
+    handle = live.connect(&script, postgres);
+    const auto pg_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!live.is_connected(handle) && std::chrono::steady_clock::now() < pg_deadline)
+      std::this_thread::yield();
+    if (!live.is_connected(handle) || live.driver_name(handle) != "PostgreSQL" ||
+        !live.close(handle)) return 1;
   }
   int driver_errors = 0;
   {

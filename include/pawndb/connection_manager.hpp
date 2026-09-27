@@ -70,13 +70,13 @@ class ConnectionManager {
     if (!amx || config.host.empty() || config.user.empty() || config.database.empty() ||
         config.charset.empty() || config.port < 1 || config.port > 65535)
       return 0;
-    auto* pool = factory_ && config.backend == Backend::mariadb ? life_.worker_pool() : nullptr;
-    if (factory_ && config.backend == Backend::mariadb && !pool) return 0;
+    auto* pool = factory_ ? life_.worker_pool() : nullptr;
+    if (factory_ && !pool) return 0;
     auto connection = std::make_shared<Connection>(amx);
     connection->set_config(std::move(config));
     auto handle = handles_.insert(connection);
     if (handle) owners_[amx].insert(handle);
-    if (handle && factory_ && connection->config->backend == Backend::mariadb) {
+    if (handle && factory_) {
       if (!pool->submit(0, WorkerPool::Priority::normal,
                         connect_work(pool, connection, life_.context(amx), handle,
                                      factory_, errors_, amx)))
@@ -104,12 +104,7 @@ class ConnectionManager {
                         if (config) {
                           try {
                             connection->set_config(std::move(*config));
-                            Backend backend;
-                            {
-                              std::lock_guard lock(connection->mutex);
-                              backend = connection->config->backend;
-                            }
-                            if (factory && backend == Backend::mariadb)
+                            if (factory)
                               establish(pool, connection, context, handle, factory, errors, amx);
                             return;
                           } catch (const std::exception& exception) {

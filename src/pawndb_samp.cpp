@@ -1,6 +1,7 @@
 #include <pawndb/lifecycle.hpp>
 #include <pawndb/connection_natives.hpp>
 #include <pawndb/mariadb_pool.hpp>
+#include <pawndb/postgres_pool.hpp>
 #include <plugincommon.h>
 #include <amx/amx.h>
 
@@ -65,7 +66,11 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data) {
         connection_error(static_cast<AMX*>(amx), handle, code, message);
       }, [](std::string message) {
         if (logprintf) logprintf(const_cast<char*>("%s"), message.c_str());
-      }, pawndb::MariaPool::open);
+      }, [](const pawndb::ConnectionConfig& config, pawndb::DriverError& error) {
+        return config.backend == pawndb::Backend::postgres
+                   ? pawndb::PostgresPool::open(config, error)
+                   : pawndb::MariaPool::open(config, error);
+      });
   natives = std::make_unique<pawndb::ConnectionNatives>(
       *connections,
       [](AMX* amx, cell address, std::string& value) {

@@ -46,7 +46,7 @@ jobs:
       - name: Build and verify Linux
         if: runner.os == 'Linux'
         run: bash ci/build-linux.sh '${{ matrix.arch }}' '${{ matrix.target }}'
-      - name: Verify MariaDB and MySQL sessions
+      - name: Verify database sessions
         if: matrix.os == 'ubuntu-24.04' && matrix.arch == 'x64' && matrix.target == 'omp'
         run: |
           docker run -d --name pawndb-maria -p 127.0.0.1:33306:3306 -e MARIADB_ROOT_PASSWORD=pdbroot -e MARIADB_DATABASE=pdbtest -e MARIADB_USER=pdbuser -e MARIADB_PASSWORD=pdbpass mariadb:11.4
@@ -59,6 +59,12 @@ jobs:
           test "$(docker exec pawndb-mysql mysql -uroot -ppdbroot -Nse "SELECT plugin FROM mysql.user WHERE user='pdbuser'")" = caching_sha2_password
           ./build/ci/pawndb_mariadb_session_check 33306 pdbuser pdbpass pdbtest 127.0.0.1
           ./build/ci/pawndb_mariadb_session_check 33307 pdbuser pdbpass pdbtest 127.0.0.1
+          docker run -d --name pawndb-postgres -p 127.0.0.1:35432:5432 -e POSTGRES_PASSWORD=pdbpass -e POSTGRES_USER=pdbuser -e POSTGRES_DB=pdbtest postgres:18
+          for n in $(seq 1 60); do
+            if docker exec pawndb-postgres pg_isready -U pdbuser -d pdbtest; then break; fi
+            sleep 2
+          done
+          ./build/ci/pawndb_postgres_session_check 35432 pdbuser pdbpass pdbtest 127.0.0.1
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
         with:
