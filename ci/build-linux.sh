@@ -41,8 +41,8 @@ cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DPAWNDB_LIBPQ_INCLUDE_DIR="$deps/postgres-source/src/interfaces/libpq" \
   -DPAWNDB_LIBPQ_COMMON_INCLUDE_DIR="$deps/postgres-source/src/include" \
   "-DPAWNDB_LIBPQ_EXTRA_LIBRARIES=$deps/postgres-build/src/common/libpgcommon_shlib.a;$deps/postgres-build/src/port/libpgport.a"
-cmake --build build/ci --target "$target" pawndb_linkage_check pawndb_lifecycle_check pawndb_handle_registry_check --parallel 2
-ctest --test-dir build/ci --output-on-failure -R '^(linkage_check|lifecycle_check|handle_registry_check)$'
+cmake --build build/ci --target "$target" pawndb_linkage_check pawndb_lifecycle_check pawndb_handle_registry_check pawndb_worker_pool_check --parallel 2
+ctest --test-dir build/ci --output-on-failure -R '^(linkage_check|lifecycle_check|handle_registry_check|worker_pool_check)$'
 
 binary="build/ci/$target.so"
 test -f "$binary"

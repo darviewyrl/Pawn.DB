@@ -129,6 +129,12 @@ add_executable(pawndb_handle_registry_check tests/handle_registry_check.cpp)
 target_include_directories(pawndb_handle_registry_check PRIVATE include)
 add_test(NAME handle_registry_check COMMAND pawndb_handle_registry_check)
 
+find_package(Threads REQUIRED)
+add_executable(pawndb_worker_pool_check tests/worker_pool_check.cpp)
+target_include_directories(pawndb_worker_pool_check PRIVATE include)
+target_link_libraries(pawndb_worker_pool_check PRIVATE Threads::Threads)
+add_test(NAME worker_pool_check COMMAND pawndb_worker_pool_check)
+
 if(WIN32)
   add_executable(pawndb_omp_entry_check tests/omp_entry_check.cpp)
   target_link_libraries(pawndb_omp_entry_check PRIVATE OMP-SDK)

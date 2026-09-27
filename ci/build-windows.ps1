@@ -47,8 +47,8 @@ $pgExtra = "$pgBuild/src/common/libpgcommon_shlib.a;$pgBuild/src/port/libpgport.
 cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=Release "-DOPENSSL_ROOT_DIR=$opensslInstall" "-DLIB_EAY_RELEASE=$opensslInstall/lib/libcrypto.lib" "-DSSL_EAY_RELEASE=$opensslInstall/lib/libssl.lib" "-DPAWNDB_LIBPQ_STATIC_LIBRARY=$pgBuild/src/interfaces/libpq/libpq.a" "-DPAWNDB_LIBPQ_INCLUDE_DIR=$pgSource/src/interfaces/libpq" "-DPAWNDB_LIBPQ_COMMON_INCLUDE_DIR=$pgSource/src/include" "-DPAWNDB_LIBPQ_EXTRA_LIBRARIES=$pgExtra"
 $target = "pawndb_$Adapter"
 $adapterCheck = if ($Adapter -eq 'omp') { 'pawndb_omp_entry_check' } else { 'pawndb_samp_lifecycle_check' }
-$testPattern = if ($Adapter -eq 'omp') { '^(linkage_check|lifecycle_check|handle_registry_check|omp_entry_check)$' } else { '^(linkage_check|lifecycle_check|handle_registry_check|samp_lifecycle_check)$' }
-cmake --build build/ci --target $target pawndb_linkage_check pawndb_lifecycle_check pawndb_handle_registry_check $adapterCheck --parallel 2
+$testPattern = if ($Adapter -eq 'omp') { '^(linkage_check|lifecycle_check|handle_registry_check|worker_pool_check|omp_entry_check)$' } else { '^(linkage_check|lifecycle_check|handle_registry_check|worker_pool_check|samp_lifecycle_check)$' }
+cmake --build build/ci --target $target pawndb_linkage_check pawndb_lifecycle_check pawndb_handle_registry_check pawndb_worker_pool_check $adapterCheck --parallel 2
 ctest --test-dir build/ci --output-on-failure -R $testPattern
 $binary = "build/ci/$target.dll"
 if (-not (Test-Path $binary)) { throw "Missing $binary" }
