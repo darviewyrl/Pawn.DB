@@ -67,6 +67,7 @@ target_include_directories(pawndb_argon2 PUBLIC third_party/argon2/include PRIVA
 
 add_library(pawndb_dependencies INTERFACE)
 target_include_directories(pawndb_dependencies INTERFACE
+  include
   "${PAWNDB_LIBPQ_INCLUDE_DIR}"
   "${PAWNDB_LIBPQ_COMMON_INCLUDE_DIR}"
   third_party/mariadb-connector-c/include
@@ -89,8 +90,14 @@ foreach(target IN ITEMS pawndb_omp pawndb_samp)
   target_link_libraries(${target} PRIVATE pawndb_dependencies)
   if(target STREQUAL "pawndb_omp")
     target_link_libraries(${target} PRIVATE OMP-SDK)
+    target_include_directories(${target} PRIVATE third_party/omp-pawn-compiler/source)
+    target_compile_definitions(${target} PRIVATE HAVE_STDINT_H=1 PAWN_CELL_SIZE=32)
   else()
     target_include_directories(${target} PRIVATE third_party/samp-plugin-sdk)
+    target_compile_definitions(${target} PRIVATE HAVE_STDINT_H=1)
+    if(WIN32)
+      target_sources(${target} PRIVATE src/pawndb_samp.def)
+    endif()
   endif()
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(${target} PRIVATE -static-libgcc -static-libstdc++)
@@ -104,3 +111,19 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 enable_testing()
 add_test(NAME linkage_check COMMAND pawndb_linkage_check)
+
+add_executable(pawndb_lifecycle_check tests/lifecycle_check.cpp)
+target_include_directories(pawndb_lifecycle_check PRIVATE include)
+add_test(NAME lifecycle_check COMMAND pawndb_lifecycle_check)
+
+if(WIN32)
+  add_executable(pawndb_omp_entry_check tests/omp_entry_check.cpp)
+  target_link_libraries(pawndb_omp_entry_check PRIVATE OMP-SDK)
+  add_test(NAME omp_entry_check COMMAND pawndb_omp_entry_check $<TARGET_FILE:pawndb_omp>)
+  if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    add_executable(pawndb_samp_lifecycle_check tests/samp_lifecycle_check.cpp)
+    target_include_directories(pawndb_samp_lifecycle_check PRIVATE third_party/samp-plugin-sdk)
+    target_compile_definitions(pawndb_samp_lifecycle_check PRIVATE HAVE_STDINT_H=1)
+    add_test(NAME samp_lifecycle_check COMMAND pawndb_samp_lifecycle_check $<TARGET_FILE:pawndb_samp>)
+  endif()
+endif()

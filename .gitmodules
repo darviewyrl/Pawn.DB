@@ -19,3 +19,6 @@
 [submodule "curl"]
 	path = third_party/curl
 	url = https://github.com/curl/curl.git
+[submodule "third_party/omp-pawn-compiler"]
+	path = third_party/omp-pawn-compiler
+	url = https://github.com/openmultiplayer/compiler.git
