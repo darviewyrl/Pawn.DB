@@ -38,13 +38,18 @@ class HandleRegistry {
 
   template <class T>
   std::shared_ptr<T> get(Handle handle) const {
+    return get<T>(handle, true);
+  }
+
+  template <class T>
+  std::shared_ptr<T> get(Handle handle, bool warn_invalid) const {
     std::shared_ptr<T> result;
     {
       std::lock_guard lock(mutex_);
       if (const auto* slot = valid(handle); slot && slot->type == typeid(T))
         result = std::static_pointer_cast<T>(slot->value);
     }
-    if (!result) warn(handle);
+    if (!result && warn_invalid) warn(handle);
     return result;
   }
 

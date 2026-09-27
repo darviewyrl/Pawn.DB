@@ -18,20 +18,24 @@ class PostgresPool final : public SessionPool {
   }
 
   static std::shared_ptr<SessionPool> open(const ConnectionConfig& config, DriverError& error) {
-    if (config.ssl_enabled) {
-      error = {-4, "TLS connection settings are not supported by this build"};
-      return {};
-    }
     auto pool = std::shared_ptr<PostgresPool>(new PostgresPool);
     pool->multi_statements_ = config.multi_statements;
     const auto port = std::to_string(config.port);
     const auto timeout = std::to_string(config.connect_timeout);
     const char* keys[] = {"host", "port", "user", "password", "dbname", "connect_timeout",
-                          "client_encoding", "sslmode", nullptr};
+                          "client_encoding", "sslmode", "sslrootcert", "sslcert", "sslkey",
+                          "ssl_min_protocol_version", "ssl_max_protocol_version", nullptr};
+    const char* sslmode = !config.ssl_enabled ? "disable" :
+        (config.verify_server_cert ? "verify-full" : "require");
     const char* values[] = {config.host.c_str(), port.c_str(), config.user.c_str(),
                             config.password.c_str(), config.database.c_str(), timeout.c_str(),
                             config.charset == "utf8mb4" ? "UTF8" : config.charset.c_str(),
-                            "disable", nullptr};
+                            sslmode, config.ssl_enabled && config.verify_server_cert
+                                ? config.ca_cert.c_str() : nullptr,
+                            config.client_cert.empty() ? nullptr : config.client_cert.c_str(),
+                            config.client_key.empty() ? nullptr : config.client_key.c_str(),
+                            config.ssl_enabled ? "TLSv1.2" : nullptr,
+                            config.ssl_enabled ? "TLSv1.3" : nullptr, nullptr};
     for (int i = 0; i < config.pool_size; ++i) {
       std::unique_ptr<PGconn, decltype(&PQfinish)> session(PQconnectdbParams(keys, values, 0),
                                                            PQfinish);

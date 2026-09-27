@@ -11,6 +11,11 @@
 namespace pawndb {
 
 enum class Backend { mariadb, postgres };
+enum class DriverChoice { automatic, mariadb, postgres };
+
+inline Backend infer_backend(int port) {
+  return port == 5432 ? Backend::postgres : Backend::mariadb;
+}
 
 struct ConnectionConfig {
   Backend backend = Backend::mariadb;
@@ -51,7 +56,7 @@ inline std::optional<ConnectionConfig> parse_config(const nlohmann::json& json,
     ConnectionConfig config;
     const auto driver = json.value("driver", std::string{});
     config.port = json.value("port", driver == "postgres" ? 5432 : 3306);
-    if (driver == "postgres" || (driver.empty() && config.port == 5432))
+    if (driver == "postgres" || (driver.empty() && infer_backend(config.port) == Backend::postgres))
       config.backend = Backend::postgres;
     else if (!driver.empty() && driver != "mysql")
       throw std::invalid_argument("driver must be mysql or postgres");
@@ -81,6 +86,9 @@ inline std::optional<ConnectionConfig> parse_config(const nlohmann::json& json,
       config.client_key = ssl.value("client_key", config.client_key);
       config.verify_server_cert = ssl.value("verify_server_cert", config.verify_server_cert);
     }
+    if (config.ssl_enabled && (config.ca_cert.empty() ||
+        config.client_cert.empty() != config.client_key.empty()))
+      throw std::invalid_argument("invalid TLS certificate settings");
     return config;
   } catch (const std::exception& exception) {
     error = exception.what();

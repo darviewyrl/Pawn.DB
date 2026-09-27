@@ -19,13 +19,20 @@ int main(int argc, char** argv) {
   config.port = 1;
   config.pool_size = 2;
   config.connect_timeout = 1;
-  const bool online = argc == 6;
+  const bool online = argc == 6 || argc == 10;
   if (online) {
     config.port = std::atoi(argv[1]);
     config.user = argv[2];
     config.password = argv[3];
     config.database = argv[4];
     config.host = argv[5];
+    if (argc == 10) {
+      config.ssl_enabled = true;
+      config.ca_cert = argv[6];
+      config.client_cert = argv[7];
+      config.client_key = argv[8];
+      config.verify_server_cert = std::atoi(argv[9]) != 0;
+    }
   } else if (argc != 1) return 1;
 
   pawndb::Lifecycle life;

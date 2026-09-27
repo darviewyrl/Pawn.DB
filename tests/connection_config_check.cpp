@@ -14,6 +14,17 @@ int main() {
   input["driver"] = "mysql";
   config = pawndb::parse_config(input, error);
   if (!config || config->backend != pawndb::Backend::mariadb) return 1;
+  input["port"] = 33306;
+  config = pawndb::parse_config(input, error);
+  if (!config || config->backend != pawndb::Backend::mariadb) return 1;
+  input["ssl"] = {{"enable", true}, {"ca_cert", "ca.pem"},
+                   {"client_cert", "client.pem"}, {"client_key", "client.key"}};
+  config = pawndb::parse_config(input, error);
+  if (!config || !config->ssl_enabled || !config->verify_server_cert ||
+      config->client_cert != "client.pem") return 1;
+  input["ssl"]["client_key"] = "";
+  if (pawndb::parse_config(input, error) || error.empty()) return 1;
+  input.erase("ssl");
   input.erase("port");
   input["driver"] = "postgres";
   config = pawndb::parse_config(input, error);

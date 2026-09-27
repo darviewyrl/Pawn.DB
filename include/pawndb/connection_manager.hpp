@@ -25,23 +25,22 @@ struct Connection {
   std::atomic<ConnectionState> state{ConnectionState::pending};
   std::mutex mutex;
   std::optional<ConnectionConfig> config;
-  std::optional<std::string> charset;
-  std::optional<int> timeout;
   std::optional<int> debug_level;
-  std::optional<bool> reconnect;
-  std::optional<bool> multi_statements;
   std::shared_ptr<SessionPool> sessions;
-  bool handshake_started = false;
 
   void set_config(ConnectionConfig next) {
     std::lock_guard lock(mutex);
-    if (charset) next.charset = *charset;
-    if (timeout) next.connect_timeout = *timeout;
     if (debug_level) next.debug_level = *debug_level;
-    if (reconnect) next.auto_reconnect = *reconnect;
-    if (multi_statements) next.multi_statements = *multi_statements;
     config = std::move(next);
   }
+};
+
+struct SetupConfiguration {
+  explicit SetupConfiguration(void* script) : owner(script) {}
+  void* owner;
+  std::mutex mutex;
+  ConnectionConfig config;
+  DriverChoice driver = DriverChoice::automatic;
 };
 
 class ConnectionManager {
@@ -60,15 +59,44 @@ class ConnectionManager {
         }) {}
 
   ~ConnectionManager() {
-    std::vector<Handle> pending;
-    for (const auto& [_, handles] : owners_)
-      pending.insert(pending.end(), handles.begin(), handles.end());
-    for (auto handle : pending) close(handle);
+    std::vector<void*> scripts;
+    scripts.reserve(owners_.size());
+    for (const auto& [script, _] : owners_) scripts.push_back(script);
+    for (auto* script : scripts) detach(script);
   }
 
   Handle connect(void* amx, ConnectionConfig config) {
+    return connect(amx, std::move(config), 0, true);
+  }
+
+  Handle connect(void* amx, ConnectionConfig config, Handle setup_handle, bool auto_free_setup) {
+    if (setup_handle) {
+      auto setup = handles_.get<SetupConfiguration>(setup_handle);
+      if (!setup) return 0;
+      {
+        std::lock_guard lock(setup->mutex);
+        config.charset = setup->config.charset;
+        config.connect_timeout = setup->config.connect_timeout;
+        config.auto_reconnect = setup->config.auto_reconnect;
+        config.multi_statements = setup->config.multi_statements;
+        config.pool_size = setup->config.pool_size;
+        config.ssl_enabled = setup->config.ssl_enabled;
+        config.ca_cert = setup->config.ca_cert;
+        config.client_cert = setup->config.client_cert;
+        config.client_key = setup->config.client_key;
+        config.verify_server_cert = setup->config.verify_server_cert;
+        config.backend = setup->driver == DriverChoice::automatic ? infer_backend(config.port) :
+            (setup->driver == DriverChoice::postgres ? Backend::postgres : Backend::mariadb);
+      }
+      if (auto_free_setup) free_setup(setup_handle);
+    } else {
+      config.backend = infer_backend(config.port);
+    }
     if (!amx || config.host.empty() || config.user.empty() || config.database.empty() ||
-        config.charset.empty() || config.port < 1 || config.port > 65535)
+        config.charset.empty() || config.port < 1 || config.port > 65535 ||
+        config.connect_timeout < 1 || config.pool_size < 1 ||
+        (config.ssl_enabled && (config.ca_cert.empty() ||
+         config.client_cert.empty() != config.client_key.empty())))
       return 0;
     auto* pool = factory_ ? life_.worker_pool() : nullptr;
     if (factory_ && !pool) return 0;
@@ -83,6 +111,69 @@ class ConnectionManager {
         queue_error(pool, connection, life_.context(amx), handle, amx);
     }
     return handle;
+  }
+
+  Handle setup_init(void* amx) {
+    if (!amx) return 0;
+    auto setup = std::make_shared<SetupConfiguration>(amx);
+    const auto handle = handles_.insert(setup);
+    if (handle) owners_[amx].insert(handle);
+    return handle;
+  }
+
+  bool free_setup(Handle handle) {
+    auto setup = handles_.get<SetupConfiguration>(handle);
+    if (!setup || !handles_.erase<SetupConfiguration>(handle)) return false;
+    owners_[setup->owner].erase(handle);
+    return true;
+  }
+
+  bool setup_charset(Handle handle, std::string value) {
+    auto setup = handles_.get<SetupConfiguration>(handle);
+    if (!setup || value.empty()) return false;
+    std::lock_guard lock(setup->mutex);
+    setup->config.charset = std::move(value);
+    return true;
+  }
+
+  bool setup_option(Handle handle, int option, int value) {
+    auto setup = handles_.get<SetupConfiguration>(handle);
+    if (!setup) return false;
+    std::lock_guard lock(setup->mutex);
+    switch (option) {
+      case 0:
+        if (value < 1) return false;
+        setup->config.connect_timeout = value;
+        return true;
+      case 1: setup->config.auto_reconnect = value != 0; return true;
+      case 2: setup->config.multi_statements = value != 0; return true;
+      case 3:
+        if (value < 1) return false;
+        setup->config.pool_size = value;
+        return true;
+      default: return false;
+    }
+  }
+
+  bool setup_driver(Handle handle, int driver) {
+    auto setup = handles_.get<SetupConfiguration>(handle);
+    if (!setup || driver < 0 || driver > 2) return false;
+    std::lock_guard lock(setup->mutex);
+    setup->driver = static_cast<DriverChoice>(driver);
+    return true;
+  }
+
+  bool setup_ssl(Handle handle, std::string ca_cert, std::string client_cert,
+                 std::string client_key, bool verify_server) {
+    auto setup = handles_.get<SetupConfiguration>(handle);
+    if (!setup || ca_cert.empty() || client_cert.empty() != client_key.empty()) return false;
+    std::lock_guard lock(setup->mutex);
+    setup->config.ssl_enabled = true;
+    setup->config.ca_cert = std::move(ca_cert);
+    setup->config.client_cert = std::move(client_cert);
+    setup->config.client_key = std::move(client_key);
+    setup->config.verify_server_cert = verify_server;
+    return true;
   }
 
   Handle connect_file(void* amx, std::string path) {
@@ -150,40 +241,6 @@ class ConnectionManager {
     return connection && connection->state == ConnectionState::connected;
   }
 
-  bool set_option(Handle handle, int option, std::string value) {
-    auto connection = handles_.get<Connection>(handle);
-    if (!connection || option != 0 || value.empty() || connection->state != ConnectionState::pending)
-      return false;
-    std::lock_guard lock(connection->mutex);
-    if (connection->handshake_started || connection->state != ConnectionState::pending) return false;
-    connection->charset = std::move(value);
-    if (connection->config) connection->config->charset = *connection->charset;
-    return true;
-  }
-
-  bool set_option_int(Handle handle, int option, int value) {
-    auto connection = handles_.get<Connection>(handle);
-    if (!connection || connection->state != ConnectionState::pending) return false;
-    std::lock_guard lock(connection->mutex);
-    if (connection->handshake_started || connection->state != ConnectionState::pending) return false;
-    switch (option) {
-      case 1:
-        if (value < 1) return false;
-        connection->timeout = value;
-        if (connection->config) connection->config->connect_timeout = value;
-        return true;
-      case 2:
-        connection->reconnect = value != 0;
-        if (connection->config) connection->config->auto_reconnect = *connection->reconnect;
-        return true;
-      case 3:
-        connection->multi_statements = value != 0;
-        if (connection->config) connection->config->multi_statements = *connection->multi_statements;
-        return true;
-      default: return false;
-    }
-  }
-
   bool set_debug_level(Handle handle, int level) {
     auto connection = handles_.get<Connection>(handle);
     if (!connection || level < 0 || level > 3 || connection->state == ConnectionState::closing ||
@@ -207,7 +264,10 @@ class ConnectionManager {
     auto it = owners_.find(amx);
     if (it == owners_.end()) return;
     std::vector<Handle> pending(it->second.begin(), it->second.end());
-    for (auto handle : pending) close(handle);
+    for (auto handle : pending) {
+      if (handles_.get<SetupConfiguration>(handle, false)) free_setup(handle);
+      else close(handle);
+    }
     owners_.erase(it);
   }
 
@@ -230,7 +290,6 @@ class ConnectionManager {
       {
         std::lock_guard lock(connection->mutex);
         if (connection->state != ConnectionState::pending) return;
-        connection->handshake_started = true;
         config = *connection->config;
       }
       sessions = factory(config, error);

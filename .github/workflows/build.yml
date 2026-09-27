@@ -59,12 +59,27 @@ jobs:
           test "$(docker exec pawndb-mysql mysql -uroot -ppdbroot -Nse "SELECT plugin FROM mysql.user WHERE user='pdbuser'")" = caching_sha2_password
           ./build/ci/pawndb_mariadb_session_check 33306 pdbuser pdbpass pdbtest 127.0.0.1
           ./build/ci/pawndb_mariadb_session_check 33307 pdbuser pdbpass pdbtest 127.0.0.1
-          docker run -d --name pawndb-postgres -p 127.0.0.1:35432:5432 -e POSTGRES_PASSWORD=pdbpass -e POSTGRES_USER=pdbuser -e POSTGRES_DB=pdbtest postgres:18
+          tls_dir=build/ci/tls
+          mkdir -p "$tls_dir"
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tls_dir/ca.key" -out "$tls_dir/ca.crt" -days 2 -subj '/CN=PawnDB CI CA' -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign,cRLSign'
+          openssl req -newkey rsa:2048 -nodes -keyout "$tls_dir/server.key" -out "$tls_dir/server.csr" -subj '/CN=127.0.0.1'
+          printf 'subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' > "$tls_dir/server.ext"
+          openssl x509 -req -in "$tls_dir/server.csr" -CA "$tls_dir/ca.crt" -CAkey "$tls_dir/ca.key" -CAcreateserial -out "$tls_dir/server.crt" -days 1 -sha256 -extfile "$tls_dir/server.ext"
+          openssl req -newkey rsa:2048 -nodes -keyout "$tls_dir/client.key" -out "$tls_dir/client.csr" -subj '/CN=pdbuser'
+          printf 'extendedKeyUsage=clientAuth\n' > "$tls_dir/client.ext"
+          openssl x509 -req -in "$tls_dir/client.csr" -CA "$tls_dir/ca.crt" -CAkey "$tls_dir/ca.key" -CAcreateserial -out "$tls_dir/client.crt" -days 1 -sha256 -extfile "$tls_dir/client.ext"
+          printf 'local all all trust\nhostssl pdbtest pdbuser 0.0.0.0/0 cert\nhostssl pdbtest all 0.0.0.0/0 scram-sha-256\nhostnossl pdbtest all 0.0.0.0/0 scram-sha-256\n' > "$tls_dir/pg_hba.conf"
+          chmod 600 "$tls_dir/server.key" "$tls_dir/client.key"
+          sudo chown 999:999 "$tls_dir/server.key"
+          docker run -d --name pawndb-postgres -p 127.0.0.1:35432:5432 -e POSTGRES_PASSWORD=pdbpass -e POSTGRES_USER=pdbuser -e POSTGRES_DB=pdbtest -v "$PWD/$tls_dir:/tls:ro" postgres:18 -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key -c ssl_ca_file=/tls/ca.crt -c ssl_min_protocol_version=TLSv1.2 -c ssl_max_protocol_version=TLSv1.3 -c hba_file=/tls/pg_hba.conf
           for n in $(seq 1 60); do
             if docker exec pawndb-postgres pg_isready -U pdbuser -d pdbtest; then break; fi
             sleep 2
           done
           ./build/ci/pawndb_postgres_session_check 35432 pdbuser pdbpass pdbtest 127.0.0.1
+          docker exec pawndb-postgres psql -U pdbuser -d pdbtest -c "CREATE ROLE pdbssl LOGIN PASSWORD 'pdbpass'"
+          ./build/ci/pawndb_postgres_session_check 35432 pdbssl pdbpass pdbtest 127.0.0.1 "$PWD/$tls_dir/ca.crt" "" "" 1
+          ./build/ci/pawndb_postgres_session_check 35432 pdbuser pdbpass pdbtest 127.0.0.1 "$PWD/$tls_dir/ca.crt" "$PWD/$tls_dir/client.crt" "$PWD/$tls_dir/client.key" 1
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
         with:

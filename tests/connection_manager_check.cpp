@@ -17,10 +17,14 @@ int main() {
       [&](void* amx, auto, int code, std::string) { if (amx == &script && code == -1) ++errors; },
       [&](std::string) { ++warnings; });
   pawndb::ConnectionConfig direct;
-  auto handle = manager.connect(&script, direct);
+  auto setup = manager.setup_init(&script);
+  if (!setup || !manager.setup_charset(setup, "latin1") ||
+      !manager.setup_option(setup, 0, 8)) return 1;
+  auto handle = manager.connect(&script, direct, setup, false);
+  life.dispatch_tick();
+  if (!manager.setup_charset(setup, "utf8mb4")) return 1;
   if (!handle || manager.is_connected(handle) || !manager.driver_name(handle) ||
-      !manager.set_option(handle, 0, "latin1") || !manager.set_option_int(handle, 1, 8) ||
-      !manager.set_debug_level(handle, 2)) return 1;
+      !manager.set_debug_level(handle, 2) || !manager.free_setup(setup)) return 1;
   if (!manager.close(handle) || manager.close(handle) || manager.is_connected(handle)) return 1;
 
   const auto path = std::filesystem::current_path() / "pdb_missing_config.json";
@@ -79,13 +83,16 @@ int main() {
         !live.close(handle)) return 1;
   }
   int driver_errors = 0;
+  std::vector<pawndb::ConnectionConfig> captured;
+  std::mutex captured_mutex;
   {
     pawndb::ConnectionManager failed(life,
         [&](void* amx, auto, int code, std::string message) {
           if (amx == &script && code == 1045 && message == "access denied") ++driver_errors;
         }, [](std::string) {},
-        [](const pawndb::ConnectionConfig&, pawndb::DriverError& error)
+        [&](const pawndb::ConnectionConfig& config, pawndb::DriverError& error)
             -> std::shared_ptr<pawndb::SessionPool> {
+          { std::lock_guard lock(captured_mutex); captured.push_back(config); }
           error = {1045, "access denied"};
           return {};
         });
@@ -96,6 +103,44 @@ int main() {
       std::this_thread::yield();
     }
     if (driver_errors != 1 || failed.is_connected(handle) || !failed.close(handle)) return 1;
+    const auto setup = failed.setup_init(&script);
+    if (!setup || !failed.setup_charset(setup, "latin1") ||
+        !failed.setup_option(setup, 0, 12) || !failed.setup_option(setup, 1, 0) ||
+        !failed.setup_option(setup, 2, 1) || !failed.setup_option(setup, 3, 2) ||
+        !failed.setup_driver(setup, 2) || failed.setup_ssl(setup, "ca.pem", "client.pem", "", true) ||
+        !failed.setup_ssl(setup, "ca.pem", "client.pem", "client.key", true)) return 1;
+    auto routed = direct;
+    routed.port = 33306;
+    handle = failed.connect(&script, routed, setup, false);
+    if (!handle || !failed.setup_charset(setup, "utf8mb4")) return 1;
+    handle = failed.connect(&script, routed, setup, false);
+    if (!handle || !failed.free_setup(setup)) return 1;
+    const auto reuse_setup = failed.setup_init(&script);
+    if (!reuse_setup) return 1;
+    handle = failed.connect(&script, routed, reuse_setup, true);
+    if (!handle || failed.setup_charset(reuse_setup, "utf8mb4") ||
+        failed.free_setup(reuse_setup)) return 1;
+    const auto manual_setup = failed.setup_init(&script);
+    if (!manual_setup || !failed.free_setup(manual_setup) || failed.free_setup(manual_setup)) return 1;
+    const auto unload_setup = failed.setup_init(&other);
+    if (!unload_setup) return 1;
+    failed.detach(&other);
+    if (failed.setup_charset(unload_setup, "latin1")) return 1;
+    const auto capture_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < capture_deadline) {
+      { std::lock_guard lock(captured_mutex); if (captured.size() == 4) break; }
+      std::this_thread::yield();
+    }
+    {
+      std::lock_guard lock(captured_mutex);
+      if (captured.size() != 4 || captured[1].backend != pawndb::Backend::postgres ||
+          captured[1].port != 33306 || captured[1].charset != "latin1" ||
+          captured[1].connect_timeout != 12 || captured[1].auto_reconnect ||
+          !captured[1].multi_statements || captured[1].pool_size != 2 ||
+          !captured[1].ssl_enabled || captured[1].ca_cert != "ca.pem" ||
+          captured[2].charset != "utf8mb4" || captured[3].ssl_enabled ||
+          captured[3].backend != pawndb::Backend::mariadb) return 1;
+    }
   }
   life.stop();
   if (!released || released_thread == std::this_thread::get_id()) return 1;

@@ -30,8 +30,10 @@ class ConnectionNatives {
     static const AMX_NATIVE_INFO natives[] = {
         {"pdb_connect", connect}, {"pdb_connect_file", connect_file},
         {"pdb_close", close}, {"pdb_is_connected", is_connected},
-        {"pdb_set_option", set_option}, {"pdb_set_option_int", set_option_int},
         {"pdb_set_debug_level", set_debug_level}, {"pdb_get_driver_name", get_driver_name},
+        {"pdb_setup_init", setup_init}, {"pdb_setup_free", setup_free},
+        {"pdb_setup_charset", setup_charset}, {"pdb_setup_option", setup_option},
+        {"pdb_setup_driver", setup_driver}, {"pdb_setup_ssl", setup_ssl},
         {nullptr, nullptr}};
     return natives;
   }
@@ -54,10 +56,9 @@ class ConnectionNatives {
           !read(amx, params[3], config.password) || !read(amx, params[4], config.database))
         return 0;
       if (count >= 5) config.port = params[5];
-      if (count >= 6 && !read(amx, params[6], config.charset)) return 0;
-      if (count >= 7) config.auto_reconnect = params[7] != 0;
-      config.backend = config.port == 5432 ? Backend::postgres : Backend::mariadb;
-      return static_cast<cell>(current_->manager_.connect(amx, std::move(config)));
+      const auto setup = count >= 6 ? static_cast<std::uint32_t>(params[6]) : 0;
+      const bool auto_free = count < 7 || params[7] != 0;
+      return static_cast<cell>(current_->manager_.connect(amx, std::move(config), setup, auto_free));
     } catch (...) { return 0; }
   }
 
@@ -78,18 +79,42 @@ class ConnectionNatives {
     return current_ && argc(params) == 1 &&
            current_->manager_.is_connected(static_cast<std::uint32_t>(params[1]));
   }
-  static cell AMX_NATIVE_CALL set_option(AMX* amx, NativeParams params) {
-    if (!current_ || argc(params) != 3) return 0;
+  static cell AMX_NATIVE_CALL setup_init(AMX* amx, NativeParams params) {
+    return current_ && argc(params) == 0
+               ? static_cast<cell>(current_->manager_.setup_init(amx)) : 0;
+  }
+  static cell AMX_NATIVE_CALL setup_free(AMX*, NativeParams params) {
+    return current_ && argc(params) == 1 && current_->manager_.free_setup(
+        static_cast<std::uint32_t>(params[1]));
+  }
+  static cell AMX_NATIVE_CALL setup_charset(AMX* amx, NativeParams params) {
+    if (!current_ || argc(params) != 2) return 0;
     try {
       std::string value;
-      return read(amx, params[3], value) &&
-             current_->manager_.set_option(static_cast<std::uint32_t>(params[1]), params[2],
-                                           std::move(value));
+      return read(amx, params[2], value) &&
+             current_->manager_.setup_charset(static_cast<std::uint32_t>(params[1]),
+                                              std::move(value));
     } catch (...) { return 0; }
   }
-  static cell AMX_NATIVE_CALL set_option_int(AMX*, NativeParams params) {
-    return current_ && argc(params) == 3 && current_->manager_.set_option_int(
-               static_cast<std::uint32_t>(params[1]), params[2], params[3]);
+  static cell AMX_NATIVE_CALL setup_option(AMX*, NativeParams params) {
+    return current_ && argc(params) == 3 && current_->manager_.setup_option(
+        static_cast<std::uint32_t>(params[1]), params[2], params[3]);
+  }
+  static cell AMX_NATIVE_CALL setup_driver(AMX*, NativeParams params) {
+    return current_ && argc(params) == 2 && current_->manager_.setup_driver(
+        static_cast<std::uint32_t>(params[1]), params[2]);
+  }
+  static cell AMX_NATIVE_CALL setup_ssl(AMX* amx, NativeParams params) {
+    const int count = argc(params);
+    if (!current_ || count < 2 || count > 5) return 0;
+    try {
+      std::string ca, cert, key;
+      if (!read(amx, params[2], ca) ||
+          (count >= 3 && !read(amx, params[3], cert)) ||
+          (count >= 4 && !read(amx, params[4], key))) return 0;
+      return current_->manager_.setup_ssl(static_cast<std::uint32_t>(params[1]),
+          std::move(ca), std::move(cert), std::move(key), count < 5 || params[5] != 0);
+    } catch (...) { return 0; }
   }
   static cell AMX_NATIVE_CALL set_debug_level(AMX*, NativeParams params) {
     return current_ && argc(params) == 2 && current_->manager_.set_debug_level(
