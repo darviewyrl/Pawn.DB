@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -49,6 +50,7 @@ int main(int argc, char** argv) {
         auto sessions = pawndb::PostgresPool::open(config, error);
         if (online && sessions) {
           pawndb::DriverError query_error;
+          pawndb::QueryResult rows;
           const std::string input = "ไทย'; SELECT 1; --\\";
           std::vector<char> escaped(input.size() * 2 + 1);
           std::size_t escaped_size = 0;
@@ -56,6 +58,9 @@ int main(int argc, char** argv) {
                    std::string_view(escaped.data(), escaped_size).starts_with("ไทย") &&
                    sessions->query("SELECT '" + std::string(escaped.data(), escaped_size) + "'",
                                    query_error) &&
+                   sessions->query_result("SELECT 1 AS value", query_error, rows) &&
+                   rows.fields == std::vector<std::string>{"value"} && rows.rows.size() == 1 &&
+                   rows.rows[0][0] == std::optional<std::string>{"1"} &&
                    sessions->query("SELECT pg_sleep(0.2)", query_error) &&
                    !sessions->query("INVALID SQL", query_error) &&
                    query_error.code == pawndb::encode_sqlstate("42601") &&

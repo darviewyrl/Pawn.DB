@@ -1,6 +1,7 @@
 #pragma once
 
 #include <pawndb/connection_config.hpp>
+#include <pawndb/result.hpp>
 
 #include <cstddef>
 #include <functional>
@@ -20,6 +21,10 @@ class SessionPool {
  public:
   virtual ~SessionPool() = default;
   virtual bool query(std::string_view sql, DriverError& error) = 0;
+  virtual bool query_result(std::string_view sql, DriverError& error, QueryResult& result) {
+    result = {};
+    return query(sql, error);
+  }
   virtual bool ping(DriverError& error) { return query("SELECT 1", error); }
   virtual bool escape_string(std::string_view, std::span<char>, std::size_t&) const {
     return false;

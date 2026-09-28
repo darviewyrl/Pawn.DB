@@ -5,8 +5,10 @@
 
 #define PDB: _:
 #define PDBSetup: _:
+#define PDBResult: _:
 #define INVALID_PDB (PDB:0)
 #define INVALID_PDB_SETUP (PDBSetup:0)
+#define INVALID_PDB_RESULT (PDBResult:0)
 
 enum PDB_DRIVER {
     PDB_DRIVER_AUTO = 0,
@@ -51,6 +53,8 @@ native bool:pdb_is_update_available();
 native pdb_get_stat(PDB:handle, PDB_METRIC:metric_type);
 native bool:pdb_get_metrics(PDB:handle, &qps, &pending, &avg_latency_us, &slow_queries);
 native bool:pdb_set_slow_query_threshold(PDB:handle, threshold_us);
+native bool:pdb_retain_result(PDBResult:result);
+native bool:pdb_free_result(PDBResult:result);
 
 native pdb_format(PDB:handle, output[], max_len = sizeof(output), const format[],
                   {Float, PDBJson, _}:...);

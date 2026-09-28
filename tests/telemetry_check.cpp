@@ -57,13 +57,13 @@ int main() {
     return 1;
 
   std::atomic<int> completed{0};
-  if (!manager.query(handle, "SELECT 1", [&](bool ok, auto) { if (ok) ++completed; })) return 1;
+  if (!manager.query(handle, "SELECT 1", [&](bool ok, auto, auto) { if (ok) ++completed; })) return 1;
   {
     std::unique_lock lock(mutex);
     if (!ready.wait_for(lock, 2s, [&] { return entered; })) return 1;
   }
   for (int i = 1; i < 4; ++i)
-    if (!manager.query(handle, "SELECT 1", [&](bool ok, auto) { if (ok) ++completed; })) return 1;
+    if (!manager.query(handle, "SELECT 1", [&](bool ok, auto, auto) { if (ok) ++completed; })) return 1;
   const auto queued = manager.metrics(handle);
   if (!queued || queued->pending != 3) return 1;
   { std::lock_guard lock(mutex); release = true; }
@@ -78,7 +78,7 @@ int main() {
       metrics->average_latency_us < 1000 || metrics->slow_queries != 4 ||
       !manager.set_slow_query_threshold(handle, 0)) return 1;
 
-  if (!manager.query(handle, "SELECT 1", [&](bool ok, auto) { if (ok) ++completed; })) return 1;
+  if (!manager.query(handle, "SELECT 1", [&](bool ok, auto, auto) { if (ok) ++completed; })) return 1;
   const auto final_deadline = std::chrono::steady_clock::now() + 2s;
   while (completed != 5 && std::chrono::steady_clock::now() < final_deadline) {
     life.dispatch_tick();

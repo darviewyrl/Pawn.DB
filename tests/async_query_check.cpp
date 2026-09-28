@@ -39,6 +39,13 @@ int main() {
       if (sql == "INVALID SQL") { error = {1064, "syntax error"}; return false; }
       return true;
     }
+    bool query_result(std::string_view sql, pawndb::DriverError& error,
+                      pawndb::QueryResult& result) override {
+      if (!query(sql, error)) return false;
+      result.fields = {"value"};
+      result.rows = {{std::string("row")}};
+      return true;
+    }
     bool ping(pawndb::DriverError&) override { return true; }
   };
   pawndb::ConnectionManager manager(life, [](void*, auto, int, std::string) {},
@@ -56,8 +63,15 @@ int main() {
   if (!handle || !manager.is_connected(handle)) { std::cerr << "connect\n"; return 1; }
 
   std::vector<std::pair<std::string, std::vector<pawndb::ConnectionNatives::CallbackArg>>> callbacks;
+  std::uint32_t retained_result = 0;
   const auto main_thread = std::this_thread::get_id();
   std::thread::id callback_thread;
+  const auto* table = pawndb::ConnectionNatives::table();
+  const auto native = [table](const char* name) {
+    for (auto* item = table; item->name; ++item)
+      if (std::string(item->name) == name) return item->func;
+    return static_cast<AMX_NATIVE>(nullptr);
+  };
   const auto text_at = [](cell address) -> std::string {
     switch (address) {
       case 10: return "SELECT %d";
@@ -87,13 +101,12 @@ int main() {
       }, [&](AMX*, std::string_view name, const auto& args) {
         callback_thread = std::this_thread::get_id();
         callbacks.emplace_back(name, args);
+        if (name == "OnLoaded" && args.size() == 2) {
+          retained_result = static_cast<std::uint32_t>(std::get<cell>(args[0]));
+          const cell retain[] = {sizeof(cell), static_cast<cell>(retained_result)};
+          if (!native("pdb_retain_result")(&amx, retain)) retained_result = 0;
+        }
       });
-  const auto* table = pawndb::ConnectionNatives::table();
-  const auto native = [table](const char* name) {
-    for (auto* item = table; item->name; ++item)
-      if (std::string(item->name) == name) return item->func;
-    return static_cast<AMX_NATIVE>(nullptr);
-  };
 
   {
     std::lock_guard lock(mutex); block = true;
@@ -129,13 +142,21 @@ int main() {
   }
   life.dispatch_tick();
   if (callbacks.size() != 2 || callbacks[1].first != "OnLoaded" ||
-      callbacks[1].second.size() != 1 || std::get<cell>(callbacks[1].second[0]) != 42 ||
+      callbacks[1].second.size() != 2 || !retained_result ||
+      std::get<cell>(callbacks[1].second[0]) != static_cast<cell>(retained_result) ||
+      std::get<cell>(callbacks[1].second[1]) != 42 ||
       callback_thread != main_thread) {
     std::cerr << "success callback: count=" << callbacks.size()
               << " name=" << (callbacks.size() < 2 ? "" : callbacks[1].first)
               << " args=" << (callbacks.size() < 2 ? 0 : callbacks[1].second.size())
               << " thread=" << (callback_thread == main_thread) << '\n'; return 1;
   }
+  const auto stored = manager.result(&amx, retained_result);
+  if (!stored || stored->cursor != -1 || stored->data.fields != std::vector<std::string>{"value"} ||
+      stored->data.rows.size() != 1 || stored->data.rows[0][0] != "row") return 1;
+  const cell free_result[] = {sizeof(cell), static_cast<cell>(retained_result)};
+  if (!native("pdb_free_result")(&amx, free_result) ||
+      manager.result(&amx, retained_result)) return 1;
   {
     std::lock_guard lock(mutex);
     if (statements != std::vector<std::string>{"SLOW", "SELECT high", "SELECT normal"}) { std::cerr << "priority order\n"; return 1; }

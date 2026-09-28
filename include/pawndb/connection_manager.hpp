@@ -3,6 +3,7 @@
 #include <pawndb/connection_config.hpp>
 #include <pawndb/handle_registry.hpp>
 #include <pawndb/lifecycle.hpp>
+#include <pawndb/result.hpp>
 #include <pawndb/session_pool.hpp>
 
 #include <algorithm>
@@ -31,11 +32,12 @@ inline constexpr std::chrono::seconds next_reconnect_delay(std::chrono::seconds 
 struct PendingQuery {
   std::string sql;
   WorkerPool::Priority priority;
-  std::function<void(bool, DriverError)> completion;
+  std::function<void(bool, DriverError, QueryResult)> completion;
   Lifecycle::Context context;
   void* amx;
   std::uint32_t handle;
   bool flush_on_shutdown;
+  bool capture_result;
 };
 
 struct ConnectionMetrics {
@@ -84,7 +86,7 @@ struct SetupConfiguration {
 class ConnectionManager {
  public:
   using Handle = HandleRegistry::Handle;
-  using QueryCompletion = std::function<void(bool, DriverError)>;
+  using QueryCompletion = std::function<void(bool, DriverError, QueryResult)>;
   using ErrorSink = std::function<void(void*, Handle, int, std::string)>;
   using WarningSink = std::function<void(std::string)>;
 
@@ -280,7 +282,7 @@ class ConnectionManager {
 
   bool query(Handle handle, std::string sql, QueryCompletion completion = {},
              WorkerPool::Priority priority = WorkerPool::Priority::normal,
-             bool flush_on_shutdown = false) {
+             bool flush_on_shutdown = false, bool capture_result = false) {
     if (!accepting_.load(std::memory_order_acquire)) return false;
     auto connection = handles_.get<Connection>(handle);
     if (!connection || sql.empty()) return false;
@@ -296,7 +298,7 @@ class ConnectionManager {
            !connection->config->auto_reconnect)) return false;
       connection->pending_queries.push_back(
           {std::move(sql), priority, std::move(completion), life_.context(connection->owner),
-           connection->owner, handle, flush_on_shutdown});
+           connection->owner, handle, flush_on_shutdown, capture_result});
       start_drain = state == ConnectionState::connected && !connection->draining_queries;
     }
     if (start_drain) schedule_drain(pool, connection);
@@ -389,6 +391,41 @@ class ConnectionManager {
     return true;
   }
 
+  Handle create_result(void* amx, QueryResult data) {
+    if (life_.context(amx).expired()) return 0;
+    Handle handle = 0;
+    try {
+      handle = handles_.insert(std::make_shared<ResultObject>(std::move(data), amx));
+      if (handle) owners_[amx].insert(handle);
+      return handle;
+    } catch (...) {
+      if (handle) handles_.erase<ResultObject>(handle);
+      return 0;
+    }
+  }
+
+  bool retain_result(void* amx, Handle handle) {
+    auto result = get_result(handle);
+    if (!result || result->owner != amx) return false;
+    result->retained = true;
+    return true;
+  }
+
+  std::shared_ptr<ResultObject> result(void* amx, Handle handle) {
+    auto value = get_result(handle);
+    return value && value->owner == amx ? value : nullptr;
+  }
+
+  bool free_result(void* amx, Handle handle) {
+    auto result = get_result(handle);
+    return result && result->owner == amx && erase_result(amx, handle);
+  }
+
+  void release_scoped_result(void* amx, Handle handle) {
+    auto result = handles_.get<ResultObject>(handle, false);
+    if (result && result->owner == amx && !result->retained) erase_result(amx, handle);
+  }
+
   std::shared_ptr<const EscapeSnapshot> escape_snapshot(Handle handle) const {
     auto connection = handles_.get<Connection>(handle);
     return connection ? connection->escape_context.load(std::memory_order_acquire) : nullptr;
@@ -421,6 +458,7 @@ class ConnectionManager {
     std::vector<Handle> pending(it->second.begin(), it->second.end());
     for (auto handle : pending) {
       if (handles_.get<SetupConfiguration>(handle, false)) free_setup(handle);
+      else if (handles_.get<ResultObject>(handle, false)) erase_result(amx, handle);
       else close(handle);
     }
     owners_.erase(it);
@@ -434,6 +472,22 @@ class ConnectionManager {
   HandleRegistry handles_;
   std::unordered_map<void*, std::unordered_set<Handle>> owners_;
   std::atomic<bool> accepting_{true};
+
+  std::shared_ptr<ResultObject> get_result(Handle handle) {
+    auto result = handles_.get<ResultObject>(handle, false);
+    if (!result)
+      warnings_("[Pawn.DB Warning] Attempted to access an invalid or deallocated PDBResult handle (Handle: " +
+                std::to_string(static_cast<std::int32_t>(handle)) + ").");
+    return result;
+  }
+
+  bool erase_result(void* amx, Handle handle) {
+    if (!handles_.erase<ResultObject>(handle)) return false;
+    if (auto owner = owners_.find(amx); owner != owners_.end()) {
+      owner->second.erase(handle);
+    }
+    return true;
+  }
 
   static void establish(WorkerPool* pool, const std::shared_ptr<Connection>& connection,
                         Lifecycle::Context context, Handle handle, const SessionFactory& factory,
@@ -506,12 +560,12 @@ class ConnectionManager {
   }
 
   static void complete_query(WorkerPool* pool, PendingQuery query, bool success,
-                             DriverError error = {}) {
+                             DriverError error = {}, QueryResult result = {}) {
     if (!query.completion) return;
     pool->publish(Lifecycle::guard_callback(
         query.context, [completion = std::move(query.completion), success,
-                        error = std::move(error)]() mutable {
-          completion(success, std::move(error));
+        error = std::move(error), result = std::move(result)]() mutable {
+          completion(success, std::move(error), std::move(result));
         }));
   }
 
@@ -537,8 +591,12 @@ class ConnectionManager {
     }
     DriverError error;
     bool ok = false;
+    QueryResult result;
     const auto started = std::chrono::steady_clock::now();
-    try { ok = sessions && sessions->query(query.sql, error); }
+    try {
+      ok = sessions && (query.capture_result ? sessions->query_result(query.sql, error, result)
+                                             : sessions->query(query.sql, error));
+    }
     catch (const std::exception& exception) { error = {-4, exception.what()}; }
     catch (...) { error = {-4, "internal query failure"}; }
     const auto finished = std::chrono::steady_clock::now();
@@ -571,7 +629,7 @@ class ConnectionManager {
       }
       complete_query(pool, std::move(query), false, std::move(error));
     } else {
-      complete_query(pool, std::move(query), true);
+      complete_query(pool, std::move(query), true, {}, std::move(result));
     }
     {
       std::lock_guard lock(connection->mutex);

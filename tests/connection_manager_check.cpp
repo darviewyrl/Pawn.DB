@@ -208,7 +208,7 @@ int main() {
     if (reconnecting.is_connected(recovered)) return 1;
     if (!reconnecting.query(recovered, "SELECT retained")) return 1;
     std::atomic<bool> query_done{false}, query_ok{false};
-    if (!reconnecting.query(recovered, "SELECT retained callback", [&](bool ok, auto) {
+    if (!reconnecting.query(recovered, "SELECT retained callback", [&](bool ok, auto, auto) {
           query_ok = ok;
           query_done = true;
         })) return 1;

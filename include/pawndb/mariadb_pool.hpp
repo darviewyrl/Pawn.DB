@@ -76,6 +76,15 @@ class MariaPool final : public SessionPool {
   }
 
   bool query(std::string_view sql, DriverError& error) override {
+    return execute(sql, error, nullptr);
+  }
+
+  bool query_result(std::string_view sql, DriverError& error, QueryResult& result) override {
+    return execute(sql, error, &result);
+  }
+
+ private:
+  bool execute(std::string_view sql, DriverError& error, QueryResult* output) {
     std::unique_lock lock(mutex_);
     cv_.wait(lock, [this] {
       for (bool busy : busy_) if (!busy) return true;
@@ -88,15 +97,46 @@ class MariaPool final : public SessionPool {
     lock.unlock();
 
     bool ok = mysql_real_query(session, sql.data(), static_cast<unsigned long>(sql.size())) == 0;
+    if (output) *output = {};
+    bool captured = false;
     if (ok) {
       for (;;) {
-        if (auto* result = mysql_store_result(session)) mysql_free_result(result);
-        else if (mysql_field_count(session)) { ok = false; break; }
+        if (auto* result = mysql_store_result(session)) {
+          if (output && !captured) {
+            try {
+              const auto fields = mysql_num_fields(result);
+              const auto* names = mysql_fetch_fields(result);
+              output->fields.reserve(fields);
+              for (unsigned int i = 0; i < fields; ++i) output->fields.emplace_back(names[i].name);
+              while (auto row = mysql_fetch_row(result)) {
+                const auto* lengths = mysql_fetch_lengths(result);
+                if (!lengths) { ok = false; error = {-4, "unable to read result row"}; break; }
+                std::vector<std::optional<std::string>> values;
+                values.reserve(fields);
+                for (unsigned int i = 0; i < fields; ++i)
+                  values.emplace_back(row[i] ? std::optional<std::string>(
+                                                   std::string(row[i], lengths[i])) :
+                                               std::nullopt);
+                output->rows.push_back(std::move(values));
+              }
+              if (mysql_errno(session)) {
+                error = {static_cast<int>(mysql_errno(session)), mysql_error(session)};
+                ok = false;
+              }
+              captured = true;
+            } catch (...) {
+              error = {-4, "result allocation failed"};
+              ok = false;
+              captured = true;
+            }
+          }
+          mysql_free_result(result);
+        } else if (mysql_field_count(session)) { ok = false; break; }
         if (!mysql_more_results(session)) break;
         if (mysql_next_result(session)) { ok = false; break; }
       }
     }
-    if (!ok) {
+    if (!ok && error.message.empty()) {
       error = {static_cast<int>(mysql_errno(session)), mysql_error(session)};
       if (!error.code) error.code = -4;
     }
@@ -107,6 +147,7 @@ class MariaPool final : public SessionPool {
     return ok;
   }
 
+ public:
   bool escape_string(std::string_view input, std::span<char> output,
                      std::size_t& written) const override {
     if (!escape_session_ || input.size() > (std::numeric_limits<unsigned long>::max() - 1) / 2 ||

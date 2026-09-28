@@ -57,11 +57,12 @@ class ConnectionNatives {
         {"pdb_get_stat", get_stat}, {"pdb_get_metrics", get_metrics},
         {"pdb_set_slow_query_threshold", set_slow_query_threshold},
         {"pdb_format", format}, {"pdb_execute", execute}, {"pdb_query", query},
+        {"pdb_retain_result", retain_result}, {"pdb_free_result", free_result},
         {nullptr, nullptr}};
     return natives;
   }
 
-  static constexpr int native_count = 19;
+  static constexpr int native_count = 21;
 
   SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
     return format_at(amx, params, 1, 4, 5);
@@ -147,12 +148,26 @@ class ConnectionNatives {
     if (!formatted) return false;
     const auto handle = static_cast<std::uint32_t>(params[1]);
     auto invoke = invoke_callback_;
-    auto completion = [invoke = std::move(invoke), amx, handle,
+    auto* manager = &manager_;
+    auto completion = [invoke = std::move(invoke), manager, amx, handle,
                        callback_name = std::move(callback_name),
-                       callback_args = std::move(callback_args)](bool ok, DriverError error) {
+                       callback_args = std::move(callback_args)]
+        (bool ok, DriverError error, QueryResult result) {
       if (!invoke) return;
       if (ok && !callback_name.empty()) {
-        invoke(amx, callback_name, callback_args);
+        const auto result_handle = manager->create_result(amx, std::move(result));
+        if (!result_handle) {
+          invoke(amx, "OnQueryError", {static_cast<cell>(handle), cell{-4},
+                                        std::string("unable to allocate query result"),
+                                        std::string("<redacted>")});
+          return;
+        }
+        try {
+          auto args = callback_args;
+          args.insert(args.begin(), static_cast<cell>(result_handle));
+          invoke(amx, callback_name, args);
+        } catch (...) {}
+        manager->release_scoped_result(amx, result_handle);
       } else if (!ok) {
         invoke(amx, "OnQueryError", {static_cast<cell>(handle), static_cast<cell>(error.code),
                                       std::move(error.message), std::string("<redacted>")});
@@ -160,7 +175,7 @@ class ConnectionNatives {
     };
     if (manager_.query(handle, std::string(formatted.sql.view()), std::move(completion),
                        query_request ? WorkerPool::Priority::high : WorkerPool::Priority::normal,
-                       !query_request))
+                       !query_request, query_request))
       return true;
     if (invoke_callback_)
       invoke_callback_(amx, "OnQueryError", {static_cast<cell>(handle), cell{-3},
@@ -311,6 +326,16 @@ class ConnectionNatives {
 
   static cell AMX_NATIVE_CALL query(AMX* amx, NativeParams params) {
     return current_ && argc(params) >= 4 && current_->submit(amx, params, true);
+  }
+
+  static cell AMX_NATIVE_CALL retain_result(AMX* amx, NativeParams params) {
+    return current_ && argc(params) == 1 && current_->manager_.retain_result(
+        amx, static_cast<std::uint32_t>(params[1]));
+  }
+
+  static cell AMX_NATIVE_CALL free_result(AMX* amx, NativeParams params) {
+    return current_ && argc(params) == 1 && current_->manager_.free_result(
+        amx, static_cast<std::uint32_t>(params[1]));
   }
 
   ConnectionManager& manager_;
