@@ -55,6 +55,21 @@ native bool:pdb_get_metrics(PDB:handle, &qps, &pending, &avg_latency_us, &slow_q
 native bool:pdb_set_slow_query_threshold(PDB:handle, threshold_us);
 native bool:pdb_retain_result(PDBResult:result);
 native bool:pdb_free_result(PDBResult:result);
+native pdb_num_rows(PDBResult:result);
+native pdb_num_fields(PDBResult:result);
+native bool:pdb_next_row(PDBResult:result);
+native bool:pdb_seek_row(PDBResult:result, row_index);
+native bool:pdb_field_name(PDBResult:result, field_index, output[], max_len = sizeof(output));
+native bool:pdb_is_null(PDBResult:result, const field_name[]);
+native bool:pdb_is_null_by_index(PDBResult:result, field_index);
+native pdb_get_int(PDBResult:result, const field_name[]);
+native Float:pdb_get_float(PDBResult:result, const field_name[]);
+native bool:pdb_get_str(PDBResult:result, const field_name[], output[], max_len = sizeof(output));
+native bool:pdb_get_bool(PDBResult:result, const field_name[]);
+native pdb_get_int_by_index(PDBResult:result, field_index);
+native Float:pdb_get_float_by_index(PDBResult:result, field_index);
+native bool:pdb_get_str_by_index(PDBResult:result, field_index, output[], max_len = sizeof(output));
+native bool:pdb_get_bool_by_index(PDBResult:result, field_index);
 
 native pdb_format(PDB:handle, output[], max_len = sizeof(output), const format[],
                   {Float, PDBJson, _}:...);

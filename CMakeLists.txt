@@ -175,6 +175,14 @@ target_compile_definitions(pawndb_connection_natives_check PRIVATE
 target_link_libraries(pawndb_connection_natives_check PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
 add_test(NAME connection_natives_check COMMAND pawndb_connection_natives_check)
 
+add_executable(pawndb_result_natives_check tests/result_natives_check.cpp)
+target_include_directories(pawndb_result_natives_check PRIVATE
+  include third_party/omp-pawn-compiler/source third_party/omp-pawn-compiler/source/linux)
+target_compile_definitions(pawndb_result_natives_check PRIVATE
+  HAVE_STDINT_H=1 PAWN_CELL_SIZE=32 PAWNDB_OMP=1)
+target_link_libraries(pawndb_result_natives_check PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+add_test(NAME result_natives_check COMMAND pawndb_result_natives_check)
+
 add_executable(pawndb_async_query_check tests/async_query_check.cpp)
 target_include_directories(pawndb_async_query_check PRIVATE
   include third_party/omp-pawn-compiler/source third_party/omp-pawn-compiler/source/linux)
