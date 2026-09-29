@@ -71,6 +71,46 @@ native Float:pdb_get_float_by_index(PDBResult:result, field_index);
 native bool:pdb_get_str_by_index(PDBResult:result, field_index, output[], max_len = sizeof(output));
 native bool:pdb_get_bool_by_index(PDBResult:result, field_index);
 
+stock pdb_get_num_rows(PDBResult:res, &destination) {
+    destination = pdb_num_rows(res);
+    return destination;
+}
+
+stock pdb_get_num_fields(PDBResult:res, &destination) {
+    destination = pdb_num_fields(res);
+    return destination;
+}
+
+stock bool:pdb_fetch_int(PDBResult:res, const field_name[], &destination) {
+    destination = pdb_get_int(res, field_name);
+    return !pdb_is_null(res, field_name);
+}
+
+stock bool:pdb_fetch_float(PDBResult:res, const field_name[], &Float:destination) {
+    destination = pdb_get_float(res, field_name);
+    return !pdb_is_null(res, field_name);
+}
+
+stock bool:pdb_fetch_bool(PDBResult:res, const field_name[], &bool:destination) {
+    destination = pdb_get_bool(res, field_name);
+    return !pdb_is_null(res, field_name);
+}
+
+stock bool:pdb_fetch_int_by_index(PDBResult:res, field_index, &destination) {
+    destination = pdb_get_int_by_index(res, field_index);
+    return !pdb_is_null_by_index(res, field_index);
+}
+
+stock bool:pdb_fetch_float_by_index(PDBResult:res, field_index, &Float:destination) {
+    destination = pdb_get_float_by_index(res, field_index);
+    return !pdb_is_null_by_index(res, field_index);
+}
+
+stock bool:pdb_fetch_bool_by_index(PDBResult:res, field_index, &bool:destination) {
+    destination = pdb_get_bool_by_index(res, field_index);
+    return !pdb_is_null_by_index(res, field_index);
+}
+
 native pdb_format(PDB:handle, output[], max_len = sizeof(output), const format[],
                   {Float, PDBJson, _}:...);
 native pdb_execute(PDB:handle, const format[], {Float, _}:...);
