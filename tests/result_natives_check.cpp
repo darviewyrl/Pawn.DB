@@ -61,7 +61,7 @@ int main() {
   cell zero_index[] = {2 * sizeof(cell), h, 5};
   cell field_name[] = {4 * sizeof(cell), h, 1, 203, 5};
 
-  if (pawndb::ConnectionNatives::native_count != 36 || !native("pdb_num_rows") ||
+  if (pawndb::ConnectionNatives::native_count != 46 || !native("pdb_num_rows") ||
       native("pdb_num_rows")(&amx, one) != 2 || native("pdb_num_fields")(&amx, one) != 8 ||
       native("pdb_get_int")(&amx, integer_name) != 0 ||
       native("pdb_get_int_by_index")(&amx, integer_index) != 0 ||

@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace pawndb {
@@ -83,8 +84,24 @@ class MariaPool final : public SessionPool {
     return execute(sql, error, &result);
   }
 
+  BatchExecutionResult execute_batch(std::span<const std::string> statements,
+                                     bool atomic) override {
+    const auto [session, index] = acquire_session();
+    SessionLease lease{mutex_, cv_, busy_, index};
+    return run_batch_sequential(statements, atomic,
+        [session](std::string_view sql, QueryResult& result, DriverError& error) {
+          return execute_on_session(session, sql, error, &result);
+        });
+  }
+
  private:
   bool execute(std::string_view sql, DriverError& error, QueryResult* output) {
+    const auto [session, index] = acquire_session();
+    SessionLease lease{mutex_, cv_, busy_, index};
+    return execute_on_session(session, sql, error, output);
+  }
+
+  std::pair<MYSQL*, std::size_t> acquire_session() {
     std::unique_lock lock(mutex_);
     cv_.wait(lock, [this] {
       for (bool busy : busy_) if (!busy) return true;
@@ -95,6 +112,15 @@ class MariaPool final : public SessionPool {
     busy_[index] = true;
     auto* session = sessions_[index];
     lock.unlock();
+    return {session, index};
+  }
+
+  static bool connection_error(unsigned int code) {
+    return code == 2002 || code == 2003 || code == 2006 || code == 2013 || code == 2055;
+  }
+
+  static bool execute_on_session(MYSQL* session, std::string_view sql, DriverError& error,
+                                 QueryResult* output) {
 
     bool ok = mysql_real_query(session, sql.data(), static_cast<unsigned long>(sql.size())) == 0;
     if (output) *output = {};
@@ -110,7 +136,13 @@ class MariaPool final : public SessionPool {
               for (unsigned int i = 0; i < fields; ++i) output->fields.emplace_back(names[i].name);
               while (auto row = mysql_fetch_row(result)) {
                 const auto* lengths = mysql_fetch_lengths(result);
-                if (!lengths) { ok = false; error = {-4, "unable to read result row"}; break; }
+                if (!lengths) {
+                  const auto code = mysql_errno(session);
+                  ok = false;
+                  error = {code ? static_cast<int>(code) : -4,
+                           "unable to read result row", connection_error(code), true};
+                  break;
+                }
                 std::vector<std::optional<std::string>> values;
                 values.reserve(fields);
                 for (unsigned int i = 0; i < fields; ++i)
@@ -120,12 +152,13 @@ class MariaPool final : public SessionPool {
                 output->rows.push_back(std::move(values));
               }
               if (mysql_errno(session)) {
-                error = {static_cast<int>(mysql_errno(session)), mysql_error(session)};
+                const auto code = mysql_errno(session);
+                error = {static_cast<int>(code), mysql_error(session), connection_error(code)};
                 ok = false;
               }
               captured = true;
             } catch (...) {
-              error = {-4, "result allocation failed"};
+              error = {-4, "result allocation failed", false, true};
               ok = false;
               captured = true;
             }
@@ -137,15 +170,23 @@ class MariaPool final : public SessionPool {
       }
     }
     if (!ok && error.message.empty()) {
-      error = {static_cast<int>(mysql_errno(session)), mysql_error(session)};
+      const auto code = mysql_errno(session);
+      error = {static_cast<int>(code), mysql_error(session), connection_error(code)};
       if (!error.code) error.code = -4;
     }
-    lock.lock();
-    busy_[index] = false;
-    lock.unlock();
-    cv_.notify_one();
     return ok;
   }
+
+  struct SessionLease {
+    std::mutex& mutex;
+    std::condition_variable& cv;
+    std::vector<bool>& busy;
+    std::size_t index;
+    ~SessionLease() {
+      { std::lock_guard lock(mutex); busy[index] = false; }
+      cv.notify_one();
+    }
+  };
 
  public:
   bool escape_string(std::string_view input, std::span<char> output,

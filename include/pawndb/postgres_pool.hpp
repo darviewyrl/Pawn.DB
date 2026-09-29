@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace pawndb {
@@ -72,8 +73,24 @@ class PostgresPool final : public SessionPool {
     return execute(sql, error, &output);
   }
 
+  BatchExecutionResult execute_batch(std::span<const std::string> statements,
+                                     bool atomic) override {
+    const auto [session, index] = acquire_session();
+    SessionLease lease{mutex_, cv_, busy_, index};
+    return run_batch_sequential(statements, atomic,
+        [this, session](std::string_view sql, QueryResult& result, DriverError& error) {
+          return execute_on_session(session, sql, error, &result);
+        });
+  }
+
  private:
   bool execute(std::string_view sql, DriverError& error, QueryResult* output) {
+    const auto [session, index] = acquire_session();
+    SessionLease lease{mutex_, cv_, busy_, index};
+    return execute_on_session(session, sql, error, output);
+  }
+
+  std::pair<PGconn*, std::size_t> acquire_session() {
     std::unique_lock lock(mutex_);
     cv_.wait(lock, [this] {
       for (bool busy : busy_) if (!busy) return true;
@@ -84,6 +101,11 @@ class PostgresPool final : public SessionPool {
     busy_[index] = true;
     auto* session = sessions_[index];
     lock.unlock();
+    return {session, index};
+  }
+
+  bool execute_on_session(PGconn* session, std::string_view sql, DriverError& error,
+                          QueryResult* output) const {
 
     const std::string statement(sql);
     std::unique_ptr<PGresult, decltype(&PQclear)> result(
@@ -114,11 +136,7 @@ class PostgresPool final : public SessionPool {
           }
         } catch (...) {
           *output = {};
-          error = {-4, "result allocation failed"};
-          lock.lock();
-          busy_[index] = false;
-          lock.unlock();
-          cv_.notify_one();
+          error = {-4, "result allocation failed", false, true};
           return false;
         }
       }
@@ -128,13 +146,22 @@ class PostgresPool final : public SessionPool {
       error.code = state ? encode_sqlstate(state) : kPostgresNoSqlstate;
       error.message = state ? "[" + std::string(state) + "] " + PQresultErrorMessage(result.get()) :
                               PQerrorMessage(session);
+      error.connection_error = PQstatus(session) != CONNECTION_OK || !result ||
+          (state && state[0] == '0' && state[1] == '8');
     }
-    lock.lock();
-    busy_[index] = false;
-    lock.unlock();
-    cv_.notify_one();
     return ok;
   }
+
+  struct SessionLease {
+    std::mutex& mutex;
+    std::condition_variable& cv;
+    std::vector<bool>& busy;
+    std::size_t index;
+    ~SessionLease() {
+      { std::lock_guard lock(mutex); busy[index] = false; }
+      cv.notify_one();
+    }
+  };
 
  public:
   bool escape_string(std::string_view input, std::span<char> output,

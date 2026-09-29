@@ -38,6 +38,9 @@ struct PendingQuery {
   std::uint32_t handle;
   bool flush_on_shutdown;
   bool capture_result;
+  std::vector<std::string> batch_statements;
+  bool batch_atomic = false;
+  std::function<void(BatchExecutionResult)> batch_completion;
 };
 
 struct ConnectionMetrics {
@@ -81,6 +84,15 @@ struct SetupConfiguration {
   std::mutex mutex;
   ConnectionConfig config;
   DriverChoice driver = DriverChoice::automatic;
+};
+
+struct BatchConfiguration {
+  BatchConfiguration(void* script, std::uint32_t connection_handle, bool transaction)
+      : owner(script), connection(connection_handle), atomic(transaction) {}
+  void* owner;
+  HandleRegistry::Handle connection;
+  bool atomic;
+  std::vector<std::string> statements;
 };
 
 class ConnectionManager {
@@ -298,9 +310,73 @@ class ConnectionManager {
            !connection->config->auto_reconnect)) return false;
       connection->pending_queries.push_back(
           {std::move(sql), priority, std::move(completion), life_.context(connection->owner),
-           connection->owner, handle, flush_on_shutdown, capture_result});
+           connection->owner, handle, flush_on_shutdown, capture_result, {}, false, {}});
       start_drain = state == ConnectionState::connected && !connection->draining_queries;
     }
+    if (start_drain) schedule_drain(pool, connection);
+    return true;
+  }
+
+  Handle create_batch(void* amx, Handle connection_handle, bool atomic) {
+    auto connection = handles_.get<Connection>(connection_handle);
+    if (!amx || !connection || connection->owner != amx ||
+        connection->state == ConnectionState::closing || connection->state == ConnectionState::failed)
+      return 0;
+    const auto handle = handles_.insert(
+        std::make_shared<BatchConfiguration>(amx, connection_handle, atomic));
+    if (handle) owners_[amx].insert(handle);
+    return handle;
+  }
+
+  bool add_batch(void* amx, Handle handle, std::string sql) {
+    auto batch = handles_.get<BatchConfiguration>(handle);
+    if (!batch || batch->owner != amx || sql.empty() || sql.size() > 65536 ||
+        batch->statements.size() >= 8192) return false;
+    batch->statements.push_back(std::move(sql));
+    return true;
+  }
+
+  std::optional<Handle> batch_connection(void* amx, Handle handle) {
+    auto batch = handles_.get<BatchConfiguration>(handle);
+    return batch && batch->owner == amx ? std::optional<Handle>(batch->connection) : std::nullopt;
+  }
+
+  bool free_batch(void* amx, Handle handle) {
+    auto batch = handles_.get<BatchConfiguration>(handle);
+    if (!batch || batch->owner != amx || !handles_.erase<BatchConfiguration>(handle)) return false;
+    if (auto owner = owners_.find(amx); owner != owners_.end()) owner->second.erase(handle);
+    return true;
+  }
+
+  using BatchCompletion = std::function<void(BatchExecutionResult)>;
+  bool submit_batch(void* amx, Handle handle, BatchCompletion completion) {
+    if (!accepting_.load(std::memory_order_acquire) || !amx || !completion) return false;
+    auto batch = handles_.get<BatchConfiguration>(handle);
+    if (!batch || batch->owner != amx || batch->statements.empty()) return false;
+    auto connection = handles_.get<Connection>(batch->connection);
+    if (!connection || connection->owner != amx) return false;
+    auto* pool = life_.active_worker_pool();
+    if (!pool) return false;
+    PendingQuery pending{};
+    pending.priority = WorkerPool::Priority::normal;
+    pending.context = life_.context(amx);
+    pending.amx = amx;
+    pending.handle = batch->connection;
+    pending.batch_statements = batch->statements;
+    pending.batch_atomic = batch->atomic;
+    pending.batch_completion = std::move(completion);
+    bool start_drain = false;
+    {
+      std::lock_guard lock(connection->mutex);
+      const auto state = connection->state.load();
+      if (state == ConnectionState::closing || state == ConnectionState::failed ||
+          connection->pending_queries.size() >= 8192 ||
+          (state != ConnectionState::connected && connection->config &&
+           !connection->config->auto_reconnect)) return false;
+      connection->pending_queries.push_back(std::move(pending));
+      start_drain = state == ConnectionState::connected && !connection->draining_queries;
+    }
+    free_batch(amx, handle);
     if (start_drain) schedule_drain(pool, connection);
     return true;
   }
@@ -404,6 +480,68 @@ class ConnectionManager {
     }
   }
 
+  Handle create_batch_result(void* amx, BatchExecutionResult data) {
+    if (life_.context(amx).expired()) return 0;
+    std::vector<Handle> result_handles;
+    Handle batch_handle = 0;
+    std::shared_ptr<BatchResultObject> batch;
+    try {
+      batch = std::make_shared<BatchResultObject>(amx);
+      result_handles.reserve(data.items.size());
+      batch->items.reserve(data.items.size());
+      for (auto& item : data.items) {
+        BatchResultEntry entry;
+        entry.status = item.status;
+        entry.error_code = item.error.code;
+        entry.error_message = std::move(item.error.message);
+        if (item.status == BatchItemStatus::success) {
+          entry.result_handle = create_result(amx, std::move(item.result));
+          if (!entry.result_handle) throw std::bad_alloc();
+          result_handles.push_back(entry.result_handle);
+        }
+        batch->items.push_back(std::move(entry));
+      }
+      batch_handle = handles_.insert(batch);
+      if (!batch_handle) throw std::bad_alloc();
+      owners_[amx].insert(batch_handle);
+      return batch_handle;
+    } catch (...) {
+      if (batch_handle) {
+        handles_.erase<BatchResultObject>(batch_handle);
+        if (auto owner = owners_.find(amx); owner != owners_.end()) owner->second.erase(batch_handle);
+      }
+      for (const auto result : result_handles) erase_result(amx, result);
+      return 0;
+    }
+  }
+
+  std::shared_ptr<BatchResultObject> batch_result(void* amx, Handle handle) {
+    auto value = handles_.get<BatchResultObject>(handle, false);
+    if (!value || value->owner != amx) {
+      warnings_("[Pawn.DB Warning] Attempted to access an invalid or deallocated PDBBatchResult handle.");
+      return nullptr;
+    }
+    return value;
+  }
+
+  bool retain_batch_result(void* amx, Handle handle) {
+    auto result = batch_result(amx, handle);
+    if (!result) return false;
+    result->retained = true;
+    return true;
+  }
+
+  bool free_batch_result(void* amx, Handle handle) {
+    auto result = batch_result(amx, handle);
+    return result && erase_batch_result(amx, handle, result);
+  }
+
+  void release_scoped_batch_result(void* amx, Handle handle) {
+    auto result = handles_.get<BatchResultObject>(handle, false);
+    if (result && result->owner == amx && !result->retained)
+      erase_batch_result(amx, handle, result);
+  }
+
   bool retain_result(void* amx, Handle handle) {
     auto result = get_result(handle);
     if (!result || result->owner != amx) return false;
@@ -457,8 +595,12 @@ class ConnectionManager {
     if (it == owners_.end()) return;
     std::vector<Handle> pending(it->second.begin(), it->second.end());
     for (auto handle : pending) {
+      if (!owners_[amx].contains(handle)) continue;
       if (handles_.get<SetupConfiguration>(handle, false)) free_setup(handle);
+      else if (handles_.get<BatchConfiguration>(handle, false)) free_batch(amx, handle);
       else if (handles_.get<ResultObject>(handle, false)) erase_result(amx, handle);
+      else if (auto result = handles_.get<BatchResultObject>(handle, false))
+        erase_batch_result(amx, handle, result);
       else close(handle);
     }
     owners_.erase(it);
@@ -486,6 +628,15 @@ class ConnectionManager {
     if (auto owner = owners_.find(amx); owner != owners_.end()) {
       owner->second.erase(handle);
     }
+    return true;
+  }
+
+  bool erase_batch_result(void* amx, Handle handle,
+                          const std::shared_ptr<BatchResultObject>& result) {
+    for (const auto& item : result->items)
+      if (item.result_handle) release_scoped_result(amx, item.result_handle);
+    if (!handles_.erase<BatchResultObject>(handle)) return false;
+    if (auto owner = owners_.find(amx); owner != owners_.end()) owner->second.erase(handle);
     return true;
   }
 
@@ -569,6 +720,16 @@ class ConnectionManager {
         }));
   }
 
+  static void complete_batch(WorkerPool* pool, PendingQuery query,
+                             BatchExecutionResult result) {
+    if (!query.batch_completion) return;
+    pool->publish(Lifecycle::guard_callback(
+        query.context, [completion = std::move(query.batch_completion),
+                        result = std::move(result)]() mutable {
+          completion(std::move(result));
+        }));
+  }
+
   static void drain_one(WorkerPool* pool, const std::shared_ptr<Connection>& connection) {
     PendingQuery query;
     std::shared_ptr<SessionPool> sessions;
@@ -592,10 +753,20 @@ class ConnectionManager {
     DriverError error;
     bool ok = false;
     QueryResult result;
+    BatchExecutionResult batch_result;
+    const bool is_batch = static_cast<bool>(query.batch_completion);
     const auto started = std::chrono::steady_clock::now();
     try {
-      ok = sessions && (query.capture_result ? sessions->query_result(query.sql, error, result)
-                                             : sessions->query(query.sql, error));
+      if (is_batch) {
+        batch_result = sessions ? sessions->execute_batch(query.batch_statements,
+                                                           query.batch_atomic) :
+                                  BatchExecutionResult{};
+        ok = std::all_of(batch_result.items.begin(), batch_result.items.end(),
+            [](const BatchStatementResult& item) { return item.status == BatchItemStatus::success; });
+      } else {
+        ok = sessions && (query.capture_result ? sessions->query_result(query.sql, error, result)
+                                               : sessions->query(query.sql, error));
+      }
     }
     catch (const std::exception& exception) { error = {-4, exception.what()}; }
     catch (...) { error = {-4, "internal query failure"}; }
@@ -614,7 +785,8 @@ class ConnectionManager {
       while (connection->successful_queries.front() < cutoff)
         connection->successful_queries.pop_front();
     }
-    if (!ok) {
+    const bool connection_failed = is_batch ? batch_result.connection_error : !ok;
+    if (connection_failed) {
       DriverError ping_error;
       bool healthy = false;
       try { healthy = sessions && sessions->ping(ping_error); }
@@ -627,9 +799,11 @@ class ConnectionManager {
         }
         connection->drain_ready.notify_all();
       }
-      complete_query(pool, std::move(query), false, std::move(error));
+      if (is_batch) complete_batch(pool, std::move(query), std::move(batch_result));
+      else complete_query(pool, std::move(query), false, std::move(error));
     } else {
-      complete_query(pool, std::move(query), true, {}, std::move(result));
+      if (is_batch) complete_batch(pool, std::move(query), std::move(batch_result));
+      else complete_query(pool, std::move(query), true, {}, std::move(result));
     }
     {
       std::lock_guard lock(connection->mutex);

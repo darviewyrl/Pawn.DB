@@ -16,6 +16,22 @@ struct QueryResult {
   std::vector<std::vector<std::optional<std::string>>> rows;
 };
 
+enum class BatchItemStatus : int { success, sql_error, not_executed, rolled_back };
+
+struct BatchResultEntry {
+  BatchItemStatus status = BatchItemStatus::not_executed;
+  std::uint32_t result_handle = 0;
+  int error_code = 0;
+  std::string error_message;
+};
+
+struct BatchResultObject {
+  explicit BatchResultObject(void* script) : owner(script) {}
+  void* owner;
+  std::vector<BatchResultEntry> items;
+  bool retained = false;
+};
+
 struct ResultFieldHash {
   using is_transparent = void;
   std::size_t operator()(std::string_view value) const noexcept {

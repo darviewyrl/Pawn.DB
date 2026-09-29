@@ -72,11 +72,17 @@ class ConnectionNatives {
         {"pdb_get_float_by_index", get_float_by_index},
         {"pdb_get_str_by_index", get_str_by_index},
         {"pdb_get_bool_by_index", get_bool_by_index},
+        {"pdb_batch_create", batch_create}, {"pdb_batch_free", batch_free},
+        {"pdb_batch_add", batch_add}, {"pdb_batch_execute", batch_execute},
+        {"pdb_retain_batch_result", retain_batch_result},
+        {"pdb_free_batch_result", free_batch_result}, {"pdb_batch_size", batch_size},
+        {"pdb_batch_status", batch_status}, {"pdb_batch_get_result", batch_get_result},
+        {"pdb_batch_get_error", batch_get_error},
         {nullptr, nullptr}};
     return natives;
   }
 
-  static constexpr int native_count = 36;
+  static constexpr int native_count = 46;
 
   SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
     return format_at(amx, params, 1, 4, 5);
@@ -85,6 +91,13 @@ class ConnectionNatives {
  private:
   SqlFormatResult format_at(AMX* amx, NativeParams params, int handle_index,
                             int format_index, int first_variadic) const {
+    return format_for_connection(amx, params,
+        static_cast<std::uint32_t>(params[handle_index]), format_index, first_variadic);
+  }
+
+  SqlFormatResult format_for_connection(AMX* amx, NativeParams params,
+                                        std::uint32_t connection_handle, int format_index,
+                                        int first_variadic) const {
     const int count = argc(params);
     SqlFormatResult failure;
     failure.error = SqlFormatError::malformed;
@@ -107,7 +120,7 @@ class ConnectionNatives {
       }
       const auto available = static_cast<std::size_t>(count - first_variadic + 1);
       const auto* args = reinterpret_cast<const std::int32_t*>(params + first_variadic);
-      const auto snapshot = manager_.escape_snapshot(static_cast<std::uint32_t>(params[handle_index]));
+      const auto snapshot = manager_.escape_snapshot(connection_handle);
       PawnStringScratch argument;
       auto result = format_sql(format.view(), std::span(args, available),
           [&](std::int32_t address) -> std::optional<std::string_view> {
@@ -340,6 +353,125 @@ class ConnectionNatives {
 
   static cell AMX_NATIVE_CALL query(AMX* amx, NativeParams params) {
     return current_ && argc(params) >= 4 && current_->submit(amx, params, true);
+  }
+
+  static cell AMX_NATIVE_CALL batch_create(AMX* amx, NativeParams params) {
+    const auto count = argc(params);
+    return current_ && (count == 1 || count == 2)
+        ? static_cast<cell>(current_->manager_.create_batch(amx,
+              static_cast<std::uint32_t>(params[1]), count < 2 || params[2] != 0)) : 0;
+  }
+
+  static cell AMX_NATIVE_CALL batch_free(AMX* amx, NativeParams params) {
+    return current_ && argc(params) == 1 && current_->manager_.free_batch(
+        amx, static_cast<std::uint32_t>(params[1]));
+  }
+
+  static cell AMX_NATIVE_CALL batch_add(AMX* amx, NativeParams params) {
+    if (!current_ || argc(params) < 2) return 0;
+    try {
+      const auto batch = static_cast<std::uint32_t>(params[1]);
+      const auto connection = current_->manager_.batch_connection(amx, batch);
+      if (!connection) return 0;
+      auto formatted = current_->format_for_connection(amx, params, *connection, 2, 3);
+      return formatted && current_->manager_.add_batch(amx, batch,
+          std::string(formatted.sql.view()));
+    } catch (...) { return 0; }
+  }
+
+  static cell AMX_NATIVE_CALL batch_execute(AMX* amx, NativeParams params) {
+    if (!current_ || argc(params) < 1) return 0;
+    try {
+      const auto count = argc(params);
+      const auto batch = static_cast<std::uint32_t>(params[1]);
+      const auto connection = current_->manager_.batch_connection(amx, batch);
+      if (!connection) return 0;
+      std::string callback_name = "OnBatchComplete";
+      std::string specifiers;
+      std::vector<CallbackArg> callback_args;
+      const int first_variadic = 4;
+      if (count >= 2 && !read(amx, params[2], callback_name)) return 0;
+      if (callback_name.empty()) callback_name = "OnBatchComplete";
+      if (count >= 3 && !read(amx, params[3], specifiers)) return 0;
+      const auto available = static_cast<std::size_t>(std::max(0, count - first_variadic + 1));
+      if (specifiers.size() > available) return 0;
+      callback_args.reserve(specifiers.size());
+      for (std::size_t i = 0; i < specifiers.size(); ++i) {
+        const cell value = params[first_variadic + static_cast<int>(i)];
+        if (specifiers[i] == 'd' || specifiers[i] == 'i' || specifiers[i] == 'f')
+          callback_args.emplace_back(value);
+        else if (specifiers[i] == 's') {
+          std::string text;
+          if (!read(amx, value, text)) return 0;
+          callback_args.emplace_back(std::move(text));
+        } else return 0;
+      }
+      auto invoke = current_->invoke_callback_;
+      auto* manager = &current_->manager_;
+      auto completion = [invoke = std::move(invoke), manager, amx, connection = *connection,
+                         callback_name = std::move(callback_name),
+                         callback_args = std::move(callback_args)](BatchExecutionResult data) {
+        const auto result_handle = manager->create_batch_result(amx, std::move(data));
+        if (!result_handle) return;
+        if (invoke) {
+          try {
+            auto args = callback_args;
+            args.insert(args.begin(), static_cast<cell>(result_handle));
+            args.insert(args.begin(), static_cast<cell>(connection));
+            invoke(amx, callback_name, args);
+          } catch (...) {}
+        }
+        manager->release_scoped_batch_result(amx, result_handle);
+      };
+      return current_->manager_.submit_batch(amx, batch, std::move(completion));
+    } catch (...) { return 0; }
+  }
+
+  static cell AMX_NATIVE_CALL retain_batch_result(AMX* amx, NativeParams params) {
+    return current_ && argc(params) == 1 && current_->manager_.retain_batch_result(
+        amx, static_cast<std::uint32_t>(params[1]));
+  }
+
+  static cell AMX_NATIVE_CALL free_batch_result(AMX* amx, NativeParams params) {
+    return current_ && argc(params) == 1 && current_->manager_.free_batch_result(
+        amx, static_cast<std::uint32_t>(params[1]));
+  }
+
+  static std::shared_ptr<BatchResultObject> get_batch_result(AMX* amx, NativeParams params) {
+    return current_ && argc(params) >= 1
+        ? current_->manager_.batch_result(amx, static_cast<std::uint32_t>(params[1])) : nullptr;
+  }
+
+  static cell AMX_NATIVE_CALL batch_size(AMX* amx, NativeParams params) {
+    if (argc(params) != 1) return 0;
+    const auto result = get_batch_result(amx, params);
+    return result ? static_cast<cell>(std::min<std::size_t>(
+        result->items.size(), std::numeric_limits<cell>::max())) : 0;
+  }
+
+  static cell AMX_NATIVE_CALL batch_status(AMX* amx, NativeParams params) {
+    if (argc(params) != 2 || params[2] < 0) return -1;
+    const auto result = get_batch_result(amx, params);
+    if (!result || static_cast<std::size_t>(params[2]) >= result->items.size()) return -1;
+    return static_cast<cell>(result->items[static_cast<std::size_t>(params[2])].status);
+  }
+
+  static cell AMX_NATIVE_CALL batch_get_result(AMX* amx, NativeParams params) {
+    if (argc(params) != 2 || params[2] < 0) return 0;
+    const auto result = get_batch_result(amx, params);
+    if (!result || static_cast<std::size_t>(params[2]) >= result->items.size()) return 0;
+    return static_cast<cell>(result->items[static_cast<std::size_t>(params[2])].result_handle);
+  }
+
+  static cell AMX_NATIVE_CALL batch_get_error(AMX* amx, NativeParams params) {
+    if (!current_ || argc(params) != 4 || params[2] < 0 || params[4] <= 0) return 0;
+    const auto result = get_batch_result(amx, params);
+    if (!result || static_cast<std::size_t>(params[2]) >= result->items.size()) {
+      write_string(amx, params[3], {}, static_cast<std::size_t>(params[4]));
+      return 0;
+    }
+    const auto& error = result->items[static_cast<std::size_t>(params[2])].error_message;
+    return write_string(amx, params[3], error, static_cast<std::size_t>(params[4]));
   }
 
   static cell AMX_NATIVE_CALL retain_result(AMX* amx, NativeParams params) {
