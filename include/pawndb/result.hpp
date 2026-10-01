@@ -51,16 +51,13 @@ struct ResultFieldHash {
 
 struct ResultObject {
   explicit ResultObject(QueryResult value, void* script)
-      : owner(script), next_results(std::move(value.next_results)) {
-    static_cast<QueryResultSet&>(data) = std::move(value);
-    index_fields();
-  }
+      : owner(script), data(std::move(static_cast<QueryResultSet&>(value))),
+        next_results(std::move(value.next_results)) { index_fields(); }
 
   bool has_next_result() const noexcept { return next_result_index < next_results.size(); }
   bool next_result() {
     if (!has_next_result()) return false;
-    data = {};
-    static_cast<QueryResultSet&>(data) = std::move(next_results[next_result_index++]);
+    data = std::move(next_results[next_result_index++]);
     cursor = -1;
     field_indices.clear();
     index_fields();
@@ -73,7 +70,7 @@ struct ResultObject {
   }
 
   void* owner;
-  QueryResult data;
+  QueryResultSet data;
   std::vector<QueryResultSet> next_results;
   std::size_t next_result_index = 0;
   std::unordered_map<std::string, std::size_t, ResultFieldHash, std::equal_to<>> field_indices;

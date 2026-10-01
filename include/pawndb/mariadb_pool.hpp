@@ -176,9 +176,6 @@ class MariaPool final : public SessionPool {
           const auto affected = mysql_affected_rows(session);
           current.metadata.insert_id = mysql_insert_id(session);
           current.metadata.affected_rows = affected == static_cast<my_ulonglong>(-1) ? 0 : affected;
-          current.metadata.exec_time_us = static_cast<std::uint64_t>(
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  std::chrono::steady_clock::now() - started).count());
           current.metadata.warning_count = mysql_warning_count(session);
         }
         if (output) {
@@ -194,6 +191,13 @@ class MariaPool final : public SessionPool {
         if (!mysql_more_results(session)) break;
         if (mysql_next_result(session)) { ok = false; break; }
       }
+    }
+    if (output) {
+      const auto elapsed = static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - started).count());
+      output->metadata.exec_time_us = elapsed;
+      for (auto& result : output->next_results) result.metadata.exec_time_us = elapsed;
     }
     if (!ok && error.message.empty()) {
       const auto code = mysql_errno(session);

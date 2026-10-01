@@ -192,9 +192,6 @@ class PostgresPool final : public SessionPool {
       QueryResultSet current;
       current.metadata.affected_rows = parse_count(PQcmdTuples(raw));
       if (status == PGRES_TUPLES_OK) current.metadata.insert_id = returned_id(raw);
-      current.metadata.exec_time_us = static_cast<std::uint64_t>(
-          std::chrono::duration_cast<std::chrono::microseconds>(
-              std::chrono::steady_clock::now() - started).count());
       if (status == PGRES_TUPLES_OK) {
         try {
           const auto fields = PQnfields(raw), rows = PQntuples(raw);
@@ -221,6 +218,11 @@ class PostgresPool final : public SessionPool {
         first = false;
       } else output.next_results.push_back(std::move(current));
     }
+    const auto elapsed = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count());
+    output.metadata.exec_time_us = elapsed;
+    for (auto& result : output.next_results) result.metadata.exec_time_us = elapsed;
     return ok;
   }
 

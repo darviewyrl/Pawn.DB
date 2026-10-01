@@ -129,6 +129,10 @@ int main() {
   cell empty_str_index[] = {4 * sizeof(cell), static_cast<cell>(empty), 0, 206, 4};
   if (!empty || native("pdb_next_row")(&amx, empty_handle) ||
       native("pdb_num_rows")(&amx, empty_handle) ||
+      native("pdb_insert_id")(&amx, empty_handle) ||
+      native("pdb_affected_rows")(&amx, empty_handle) ||
+      native("pdb_exec_time")(&amx, empty_handle) ||
+      native("pdb_warning_count")(&amx, empty_handle) ||
       native("pdb_get_int")(&amx, empty_int) || native("pdb_get_float_by_index")(&amx, empty_float) ||
       native("pdb_get_bool_by_index")(&amx, empty_bool) ||
       native("pdb_get_str")(&amx, empty_str_name) || native("pdb_get_str_by_index")(&amx, empty_str_index) ||
@@ -144,11 +148,15 @@ int main() {
   cell stale_bool[] = {2 * sizeof(cell), h, 0};
   if (native("pdb_get_int_by_index")(&amx, invalid_index) ||
       native("pdb_get_bool")(&amx, missing_bool) ||
-      native("pdb_num_rows")(&amx, bogus_handle) || native("pdb_get_str")(&amx, bogus_str) ||
+      native("pdb_num_rows")(&amx, bogus_handle) || native("pdb_insert_id")(&amx, bogus_handle) ||
+      native("pdb_affected_rows")(&amx, bogus_handle) || native("pdb_exec_time")(&amx, bogus_handle) ||
+      native("pdb_warning_count")(&amx, bogus_handle) || native("pdb_get_str")(&amx, bogus_str) ||
       !outputs[207].empty() ||
       native("pdb_get_str")(&amx, invalid_str) || !outputs[204].empty() ||
       !native("pdb_free_result")(&amx, one) ||
       native("pdb_num_fields")(&amx, one) || native("pdb_get_int")(&amx, integer_name) ||
+      native("pdb_insert_id")(&amx, one) || native("pdb_affected_rows")(&amx, one) ||
+      native("pdb_exec_time")(&amx, one) || native("pdb_warning_count")(&amx, one) ||
       std::bit_cast<float>(native("pdb_get_float_by_index")(&amx, stale_float)) != 0.0f ||
       native("pdb_get_bool_by_index")(&amx, stale_bool) || native("pdb_get_str")(&amx, invalid_str) ||
       !outputs[204].empty() || warnings < 2) return 1;
