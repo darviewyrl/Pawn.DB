@@ -5,6 +5,8 @@
 #include <libpq-fe.h>
 
 #include <condition_variable>
+#include <charconv>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -106,6 +108,7 @@ class PostgresPool final : public SessionPool {
 
   bool execute_on_session(PGconn* session, std::string_view sql, DriverError& error,
                           QueryResult* output) const {
+    const auto started = std::chrono::steady_clock::now();
     const std::string statement(sql);
     if (output && multi_statements_) return execute_multi_result(session, statement, error, *output);
     std::unique_ptr<PGresult, decltype(&PQclear)> result(
@@ -116,6 +119,15 @@ class PostgresPool final : public SessionPool {
                                PQresultStatus(result.get()) == PGRES_TUPLES_OK);
     if (output) {
       *output = {};
+      output->metadata.exec_time_us = static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - started).count());
+      if (ok) {
+        output->metadata.affected_rows = parse_count(PQcmdTuples(result.get()));
+        if (PQresultStatus(result.get()) == PGRES_TUPLES_OK) {
+          output->metadata.insert_id = returned_id(result.get());
+        }
+      }
       if (ok && PQresultStatus(result.get()) == PGRES_TUPLES_OK) {
         try {
           const auto fields = PQnfields(result.get());
@@ -154,6 +166,7 @@ class PostgresPool final : public SessionPool {
 
   static bool execute_multi_result(PGconn* session, const std::string& statement,
                                    DriverError& error, QueryResult& output) {
+    const auto started = std::chrono::steady_clock::now();
     output = {};
     if (!PQsendQuery(session, statement.c_str())) {
       error = {kPostgresNoSqlstate, PQerrorMessage(session), true, true};
@@ -177,6 +190,11 @@ class PostgresPool final : public SessionPool {
         continue;
       }
       QueryResultSet current;
+      current.metadata.affected_rows = parse_count(PQcmdTuples(raw));
+      if (status == PGRES_TUPLES_OK) current.metadata.insert_id = returned_id(raw);
+      current.metadata.exec_time_us = static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - started).count());
       if (status == PGRES_TUPLES_OK) {
         try {
           const auto fields = PQnfields(raw), rows = PQntuples(raw);
@@ -204,6 +222,20 @@ class PostgresPool final : public SessionPool {
       } else output.next_results.push_back(std::move(current));
     }
     return ok;
+  }
+
+  static std::uint64_t parse_count(const char* text) {
+    if (!text || !*text) return 0;
+    std::uint64_t value = 0;
+    const auto end = text + std::char_traits<char>::length(text);
+    const auto parsed = std::from_chars(text, end, value);
+    return parsed.ec == std::errc{} && parsed.ptr == end ? value : 0;
+  }
+
+  static std::uint64_t returned_id(PGresult* result) {
+    if (PQnfields(result) < 1 || PQntuples(result) < 1 || PQgetisnull(result, 0, 0) ||
+        std::string_view(PQfname(result, 0)) != "id") return 0;
+    return parse_count(PQgetvalue(result, 0, 0));
   }
 
   struct SessionLease {

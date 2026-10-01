@@ -65,7 +65,9 @@ class ConnectionNatives {
         {"pdb_retain_result", retain_result}, {"pdb_free_result", free_result},
         {"pdb_num_rows", num_rows}, {"pdb_num_fields", num_fields},
         {"pdb_next_row", next_row}, {"pdb_has_next_result", has_next_result},
-        {"pdb_next_result", next_result}, {"pdb_seek_row", seek_row},
+        {"pdb_next_result", next_result}, {"pdb_insert_id", insert_id},
+        {"pdb_affected_rows", affected_rows}, {"pdb_exec_time", exec_time},
+        {"pdb_warning_count", warning_count}, {"pdb_seek_row", seek_row},
         {"pdb_field_name", field_name}, {"pdb_is_null", is_null},
         {"pdb_is_null_by_index", is_null_by_index}, {"pdb_get_int", get_int},
         {"pdb_get_float", get_float}, {"pdb_get_str", get_str},
@@ -83,7 +85,7 @@ class ConnectionNatives {
     return natives;
   }
 
-  static constexpr int native_count = 48;
+  static constexpr int native_count = 52;
 
   SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
     return format_at(amx, params, 1, 4, 5);
@@ -603,6 +605,22 @@ class ConnectionNatives {
     const auto result = get_result(amx, params);
     return result && result->next_result();
   }
+
+  static cell result_metadata(AMX* amx, NativeParams params, int field) {
+    if (argc(params) != 1) return 0;
+    const auto result = get_result(amx, params);
+    if (!result) return 0;
+    const auto& meta = result->data.metadata;
+    const auto value = field == 0 ? meta.insert_id : field == 1 ? meta.affected_rows :
+                       field == 2 ? meta.exec_time_us : meta.warning_count;
+    return static_cast<cell>(std::min<std::uint64_t>(value,
+        static_cast<std::uint64_t>(std::numeric_limits<cell>::max())));
+  }
+
+  static cell insert_id(AMX* amx, NativeParams params) { return result_metadata(amx, params, 0); }
+  static cell affected_rows(AMX* amx, NativeParams params) { return result_metadata(amx, params, 1); }
+  static cell exec_time(AMX* amx, NativeParams params) { return result_metadata(amx, params, 2); }
+  static cell warning_count(AMX* amx, NativeParams params) { return result_metadata(amx, params, 3); }
 
   static cell seek_row(AMX* amx, NativeParams params) {
     if (argc(params) != 2 || params[2] < 0) return 0;

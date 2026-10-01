@@ -4,6 +4,7 @@
 #include <mysql.h>
 
 #include <condition_variable>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -123,7 +124,7 @@ class MariaPool final : public SessionPool {
 
   static bool execute_on_session(MYSQL* session, std::string_view sql, DriverError& error,
                                  QueryResult* output) {
-
+    const auto started = std::chrono::steady_clock::now();
     bool ok = mysql_real_query(session, sql.data(), static_cast<unsigned long>(sql.size())) == 0;
     if (output) *output = {};
     bool captured = false;
@@ -170,6 +171,15 @@ class MariaPool final : public SessionPool {
           error = {code ? static_cast<int>(code) : -4,
                    mysql_error(session), connection_error(code), true};
           ok = false;
+        }
+        if (output) {
+          const auto affected = mysql_affected_rows(session);
+          current.metadata.insert_id = mysql_insert_id(session);
+          current.metadata.affected_rows = affected == static_cast<my_ulonglong>(-1) ? 0 : affected;
+          current.metadata.exec_time_us = static_cast<std::uint64_t>(
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now() - started).count());
+          current.metadata.warning_count = mysql_warning_count(session);
         }
         if (output) {
           try {

@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
   config.backend = pawndb::Backend::postgres;
   config.host = "127.0.0.1";
   config.port = 1;
-  config.pool_size = 2;
+  config.pool_size = 1;
   config.connect_timeout = 1;
   config.multi_statements = true;
   const bool online = argc == 6 || argc == 10;
@@ -68,6 +68,10 @@ int main(int argc, char** argv) {
                    rows.next_results[0].fields == std::vector<std::string>{"second"} &&
                    rows.next_results[0].rows[0][0] == std::optional<std::string>{"2"} &&
                    sessions->query("SELECT 3", query_error) &&
+                   sessions->query("CREATE TEMPORARY TABLE p63_meta (id BIGSERIAL PRIMARY KEY, value INT)", query_error) &&
+                   sessions->query_result("INSERT INTO p63_meta(value) VALUES (1) RETURNING id", query_error, rows) &&
+                   rows.metadata.insert_id == 1 && rows.metadata.affected_rows == 1 &&
+                   rows.metadata.warning_count == 0 &&
                    sessions->query("SELECT pg_sleep(0.2)", query_error) &&
                    !sessions->query("INVALID SQL", query_error) &&
                    query_error.code == pawndb::encode_sqlstate("42601") &&

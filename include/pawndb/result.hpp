@@ -14,6 +14,12 @@ namespace pawndb {
 struct QueryResultSet {
   std::vector<std::string> fields;
   std::vector<std::vector<std::optional<std::string>>> rows;
+  struct Metadata {
+    std::uint64_t insert_id = 0;
+    std::uint64_t affected_rows = 0;
+    std::uint64_t exec_time_us = 0;
+    std::uint64_t warning_count = 0;
+  } metadata;
 };
 
 struct QueryResult : QueryResultSet {

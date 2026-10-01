@@ -39,9 +39,12 @@ int main() {
 
   pawndb::QueryResult data;
   data.fields = {"id", "score", "name", "flag", "nullable", "zero", "empty", "long"};
+  data.metadata = {7, 2, 1234, 1};
   data.rows = {{"0", "1.25", "hello", "t", std::nullopt, "0", "", std::string(1024, 'x')},
                {"42", "-2.5", "next", "false", "set", std::nullopt, "", "tail"}};
-  data.next_results.push_back({{"second"}, {{"next-set"}}});
+  pawndb::QueryResultSet next_set{{"second"}, {{"next-set"}}};
+  next_set.metadata = {9, 1, 987, 0};
+  data.next_results.push_back(std::move(next_set));
   const auto handle = manager.create_result(&amx, std::move(data));
   if (!handle) return 1;
   const auto h = static_cast<cell>(handle);
@@ -62,8 +65,12 @@ int main() {
   cell zero_index[] = {2 * sizeof(cell), h, 5};
   cell field_name[] = {4 * sizeof(cell), h, 1, 203, 5};
 
-  if (pawndb::ConnectionNatives::native_count != 48 || !native("pdb_num_rows") ||
+  if (pawndb::ConnectionNatives::native_count != 52 || !native("pdb_num_rows") ||
       !native("pdb_has_next_result") || !native("pdb_next_result") ||
+      !native("pdb_insert_id") || !native("pdb_affected_rows") ||
+      !native("pdb_exec_time") || !native("pdb_warning_count") ||
+      native("pdb_insert_id")(&amx, one) != 7 || native("pdb_affected_rows")(&amx, one) != 2 ||
+      native("pdb_exec_time")(&amx, one) != 1234 || native("pdb_warning_count")(&amx, one) != 1 ||
       native("pdb_num_rows")(&amx, one) != 2 || native("pdb_num_fields")(&amx, one) != 8 ||
       native("pdb_get_int")(&amx, integer_name) != 0 ||
       native("pdb_get_int_by_index")(&amx, integer_index) != 0 ||
@@ -105,7 +112,9 @@ int main() {
       native("pdb_get_int")(&amx, integer_name) != 42 || native("pdb_next_row")(&amx, one) ||
       !native("pdb_has_next_result")(&amx, one) || !native("pdb_next_result")(&amx, one) ||
       native("pdb_has_next_result")(&amx, one) || native("pdb_num_fields")(&amx, one) != 1 ||
-      native("pdb_num_rows")(&amx, one) != 1)
+      native("pdb_num_rows")(&amx, one) != 1 || native("pdb_insert_id")(&amx, one) != 9 ||
+      native("pdb_affected_rows")(&amx, one) != 1 || native("pdb_exec_time")(&amx, one) != 987 ||
+      native("pdb_warning_count")(&amx, one) != 0)
     return 1;
   cell next_field[] = {4 * sizeof(cell), h, 0, 203, 16};
   if (!native("pdb_field_name")(&amx, next_field) || outputs[203] != "second" ||
