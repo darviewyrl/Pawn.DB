@@ -32,7 +32,8 @@ class MariaPool final : public SessionPool {
         error = {-4, "MariaDB Connector/C initialization failed"};
         return {};
       }
-      const auto flags = config.multi_statements ? CLIENT_MULTI_STATEMENTS : 0;
+      const auto flags = CLIENT_MULTI_RESULTS |
+          (config.multi_statements ? CLIENT_MULTI_STATEMENTS : 0);
       if (mysql_options(session.get(), MYSQL_OPT_CONNECT_TIMEOUT, &timeout) ||
           mysql_options(session.get(), MYSQL_SET_CHARSET_NAME, config.charset.c_str()) ||
           (config.ssl_enabled &&
@@ -54,7 +55,8 @@ class MariaPool final : public SessionPool {
       pool->busy_.push_back(false);
     }
     std::unique_ptr<MYSQL, decltype(&mysql_close)> escape(mysql_init(nullptr), mysql_close);
-    const auto flags = config.multi_statements ? CLIENT_MULTI_STATEMENTS : 0;
+    const auto flags = CLIENT_MULTI_RESULTS |
+        (config.multi_statements ? CLIENT_MULTI_STATEMENTS : 0);
     if (!escape || mysql_options(escape.get(), MYSQL_OPT_CONNECT_TIMEOUT, &timeout) ||
         mysql_options(escape.get(), MYSQL_SET_CHARSET_NAME, config.charset.c_str()) ||
         (config.ssl_enabled &&
@@ -127,13 +129,14 @@ class MariaPool final : public SessionPool {
     bool captured = false;
     if (ok) {
       for (;;) {
+        QueryResultSet current;
         if (auto* result = mysql_store_result(session)) {
-          if (output && !captured) {
+          if (output) {
             try {
               const auto fields = mysql_num_fields(result);
               const auto* names = mysql_fetch_fields(result);
-              output->fields.reserve(fields);
-              for (unsigned int i = 0; i < fields; ++i) output->fields.emplace_back(names[i].name);
+              current.fields.reserve(fields);
+              for (unsigned int i = 0; i < fields; ++i) current.fields.emplace_back(names[i].name);
               while (auto row = mysql_fetch_row(result)) {
                 const auto* lengths = mysql_fetch_lengths(result);
                 if (!lengths) {
@@ -149,22 +152,35 @@ class MariaPool final : public SessionPool {
                   values.emplace_back(row[i] ? std::optional<std::string>(
                                                    std::string(row[i], lengths[i])) :
                                                std::nullopt);
-                output->rows.push_back(std::move(values));
+                current.rows.push_back(std::move(values));
               }
               if (mysql_errno(session)) {
                 const auto code = mysql_errno(session);
                 error = {static_cast<int>(code), mysql_error(session), connection_error(code)};
                 ok = false;
               }
-              captured = true;
             } catch (...) {
               error = {-4, "result allocation failed", false, true};
               ok = false;
-              captured = true;
             }
           }
           mysql_free_result(result);
-        } else if (mysql_field_count(session)) { ok = false; break; }
+        } else if (mysql_field_count(session)) {
+          const auto code = mysql_errno(session);
+          error = {code ? static_cast<int>(code) : -4,
+                   mysql_error(session), connection_error(code), true};
+          ok = false;
+        }
+        if (output) {
+          try {
+            if (!captured) static_cast<QueryResultSet&>(*output) = std::move(current);
+            else output->next_results.push_back(std::move(current));
+            captured = true;
+          } catch (...) {
+            error = {-4, "result allocation failed", false, true};
+            ok = false;
+          }
+        }
         if (!mysql_more_results(session)) break;
         if (mysql_next_result(session)) { ok = false; break; }
       }

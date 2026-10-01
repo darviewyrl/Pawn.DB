@@ -64,7 +64,8 @@ class ConnectionNatives {
         {"pdb_format", format}, {"pdb_execute", execute}, {"pdb_query", query},
         {"pdb_retain_result", retain_result}, {"pdb_free_result", free_result},
         {"pdb_num_rows", num_rows}, {"pdb_num_fields", num_fields},
-        {"pdb_next_row", next_row}, {"pdb_seek_row", seek_row},
+        {"pdb_next_row", next_row}, {"pdb_has_next_result", has_next_result},
+        {"pdb_next_result", next_result}, {"pdb_seek_row", seek_row},
         {"pdb_field_name", field_name}, {"pdb_is_null", is_null},
         {"pdb_is_null_by_index", is_null_by_index}, {"pdb_get_int", get_int},
         {"pdb_get_float", get_float}, {"pdb_get_str", get_str},
@@ -82,7 +83,7 @@ class ConnectionNatives {
     return natives;
   }
 
-  static constexpr int native_count = 46;
+  static constexpr int native_count = 48;
 
   SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
     return format_at(amx, params, 1, 4, 5);
@@ -589,6 +590,18 @@ class ConnectionNatives {
       return 0;
     ++result->cursor;
     return 1;
+  }
+
+  static cell has_next_result(AMX* amx, NativeParams params) {
+    if (argc(params) != 1) return 0;
+    const auto result = get_result(amx, params);
+    return result && result->has_next_result();
+  }
+
+  static cell next_result(AMX* amx, NativeParams params) {
+    if (argc(params) != 1) return 0;
+    const auto result = get_result(amx, params);
+    return result && result->next_result();
   }
 
   static cell seek_row(AMX* amx, NativeParams params) {

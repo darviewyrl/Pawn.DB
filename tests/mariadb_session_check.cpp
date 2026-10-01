@@ -14,6 +14,7 @@ int main(int argc, char** argv) {
   config.port = 1;
   config.pool_size = 2;
   config.connect_timeout = 1;
+  config.multi_statements = true;
   const bool online = argc == 6;
   if (online) {
     config.port = std::atoi(argv[1]);
@@ -46,6 +47,12 @@ int main(int argc, char** argv) {
                    sessions->query_result("SELECT 1 AS value", query_error, rows) &&
                    rows.fields == std::vector<std::string>{"value"} && rows.rows.size() == 1 &&
                    rows.rows[0][0] == std::optional<std::string>{"1"} &&
+                   sessions->query_result("SELECT 1 AS first; SELECT 2 AS second", query_error, rows) &&
+                   rows.fields == std::vector<std::string>{"first"} &&
+                   rows.next_results.size() == 1 &&
+                   rows.next_results[0].fields == std::vector<std::string>{"second"} &&
+                   rows.next_results[0].rows[0][0] == std::optional<std::string>{"2"} &&
+                   sessions->query("SELECT 3", query_error) &&
                    sessions->query("SELECT SLEEP(0.2)", query_error) &&
                    !sessions->query("INVALID SQL", query_error) && query_error.code > 0 &&
                    sessions->query("SELECT 1", query_error);

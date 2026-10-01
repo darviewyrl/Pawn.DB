@@ -11,9 +11,13 @@
 
 namespace pawndb {
 
-struct QueryResult {
+struct QueryResultSet {
   std::vector<std::string> fields;
   std::vector<std::vector<std::optional<std::string>>> rows;
+};
+
+struct QueryResult : QueryResultSet {
+  std::vector<QueryResultSet> next_results;
 };
 
 enum class BatchItemStatus : int { success, sql_error, not_executed, rolled_back };
@@ -41,13 +45,31 @@ struct ResultFieldHash {
 
 struct ResultObject {
   explicit ResultObject(QueryResult value, void* script)
-      : owner(script), data(std::move(value)) {
+      : owner(script), next_results(std::move(value.next_results)) {
+    static_cast<QueryResultSet&>(data) = std::move(value);
+    index_fields();
+  }
+
+  bool has_next_result() const noexcept { return next_result_index < next_results.size(); }
+  bool next_result() {
+    if (!has_next_result()) return false;
+    data = {};
+    static_cast<QueryResultSet&>(data) = std::move(next_results[next_result_index++]);
+    cursor = -1;
+    field_indices.clear();
+    index_fields();
+    return true;
+  }
+
+  void index_fields() {
     for (std::size_t i = 0; i < data.fields.size(); ++i)
       field_indices.emplace(data.fields[i], i);
   }
 
   void* owner;
   QueryResult data;
+  std::vector<QueryResultSet> next_results;
+  std::size_t next_result_index = 0;
   std::unordered_map<std::string, std::size_t, ResultFieldHash, std::equal_to<>> field_indices;
   std::int64_t cursor = -1;
   bool retained = false;

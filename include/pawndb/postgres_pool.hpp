@@ -106,8 +106,8 @@ class PostgresPool final : public SessionPool {
 
   bool execute_on_session(PGconn* session, std::string_view sql, DriverError& error,
                           QueryResult* output) const {
-
     const std::string statement(sql);
+    if (output && multi_statements_) return execute_multi_result(session, statement, error, *output);
     std::unique_ptr<PGresult, decltype(&PQclear)> result(
         multi_statements_ ? PQexec(session, statement.c_str()) :
                             PQexecParams(session, statement.c_str(), 0, nullptr, nullptr,
@@ -148,6 +148,60 @@ class PostgresPool final : public SessionPool {
                               PQerrorMessage(session);
       error.connection_error = PQstatus(session) != CONNECTION_OK || !result ||
           (state && state[0] == '0' && state[1] == '8');
+    }
+    return ok;
+  }
+
+  static bool execute_multi_result(PGconn* session, const std::string& statement,
+                                   DriverError& error, QueryResult& output) {
+    output = {};
+    if (!PQsendQuery(session, statement.c_str())) {
+      error = {kPostgresNoSqlstate, PQerrorMessage(session), true, true};
+      return false;
+    }
+    bool ok = true;
+    bool first = true;
+    while (PGresult* raw = PQgetResult(session)) {
+      std::unique_ptr<PGresult, decltype(&PQclear)> result(raw, PQclear);
+      const auto status = PQresultStatus(raw);
+      if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
+        if (ok) {
+          const char* state = PQresultErrorField(raw, PG_DIAG_SQLSTATE);
+          error.code = state ? encode_sqlstate(state) : kPostgresNoSqlstate;
+          error.message = state ? "[" + std::string(state) + "] " + PQresultErrorMessage(raw)
+                                : PQresultErrorMessage(raw);
+          error.connection_error = PQstatus(session) != CONNECTION_OK ||
+              (state && state[0] == '0' && state[1] == '8');
+          ok = false;
+        }
+        continue;
+      }
+      QueryResultSet current;
+      if (status == PGRES_TUPLES_OK) {
+        try {
+          const auto fields = PQnfields(raw), rows = PQntuples(raw);
+          current.fields.reserve(fields);
+          current.rows.reserve(rows);
+          for (int field = 0; field < fields; ++field)
+            current.fields.emplace_back(PQfname(raw, field));
+          for (int row = 0; row < rows; ++row) {
+            std::vector<std::optional<std::string>> values;
+            values.reserve(fields);
+            for (int field = 0; field < fields; ++field)
+              values.emplace_back(PQgetisnull(raw, row, field) ? std::nullopt :
+                  std::optional<std::string>(std::string(PQgetvalue(raw, row, field),
+                                                         PQgetlength(raw, row, field))));
+            current.rows.push_back(std::move(values));
+          }
+        } catch (...) {
+          error = {-4, "result allocation failed", false, true};
+          ok = false;
+        }
+      }
+      if (first) {
+        static_cast<QueryResultSet&>(output) = std::move(current);
+        first = false;
+      } else output.next_results.push_back(std::move(current));
     }
     return ok;
   }

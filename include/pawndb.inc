@@ -80,6 +80,8 @@ native bool:pdb_batch_get_error(PDBBatchResult:result, index, output[], max_len 
 native pdb_num_rows(PDBResult:result);
 native pdb_num_fields(PDBResult:result);
 native bool:pdb_next_row(PDBResult:result);
+native bool:pdb_has_next_result(PDBResult:result);
+native bool:pdb_next_result(PDBResult:result);
 native bool:pdb_seek_row(PDBResult:result, row_index);
 native bool:pdb_field_name(PDBResult:result, field_index, output[], max_len = sizeof(output));
 native bool:pdb_is_null(PDBResult:result, const field_name[]);

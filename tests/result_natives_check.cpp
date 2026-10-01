@@ -41,6 +41,7 @@ int main() {
   data.fields = {"id", "score", "name", "flag", "nullable", "zero", "empty", "long"};
   data.rows = {{"0", "1.25", "hello", "t", std::nullopt, "0", "", std::string(1024, 'x')},
                {"42", "-2.5", "next", "false", "set", std::nullopt, "", "tail"}};
+  data.next_results.push_back({{"second"}, {{"next-set"}}});
   const auto handle = manager.create_result(&amx, std::move(data));
   if (!handle) return 1;
   const auto h = static_cast<cell>(handle);
@@ -61,7 +62,8 @@ int main() {
   cell zero_index[] = {2 * sizeof(cell), h, 5};
   cell field_name[] = {4 * sizeof(cell), h, 1, 203, 5};
 
-  if (pawndb::ConnectionNatives::native_count != 46 || !native("pdb_num_rows") ||
+  if (pawndb::ConnectionNatives::native_count != 48 || !native("pdb_num_rows") ||
+      !native("pdb_has_next_result") || !native("pdb_next_result") ||
       native("pdb_num_rows")(&amx, one) != 2 || native("pdb_num_fields")(&amx, one) != 8 ||
       native("pdb_get_int")(&amx, integer_name) != 0 ||
       native("pdb_get_int_by_index")(&amx, integer_index) != 0 ||
@@ -100,8 +102,14 @@ int main() {
       native("pdb_get_bool_by_index")(&amx, bool_index) ||
       native("pdb_seek_row")(&amx, seek_row_negative) ||
       native("pdb_seek_row")(&amx, seek_row_invalid) ||
-      native("pdb_get_int")(&amx, integer_name) != 42 || native("pdb_next_row")(&amx, one))
+      native("pdb_get_int")(&amx, integer_name) != 42 || native("pdb_next_row")(&amx, one) ||
+      !native("pdb_has_next_result")(&amx, one) || !native("pdb_next_result")(&amx, one) ||
+      native("pdb_has_next_result")(&amx, one) || native("pdb_num_fields")(&amx, one) != 1 ||
+      native("pdb_num_rows")(&amx, one) != 1)
     return 1;
+  cell next_field[] = {4 * sizeof(cell), h, 0, 203, 16};
+  if (!native("pdb_field_name")(&amx, next_field) || outputs[203] != "second" ||
+      !native("pdb_next_row")(&amx, one)) return 1;
 
   const auto empty = manager.create_result(&amx, {});
   cell empty_handle[] = {sizeof(cell), static_cast<cell>(empty)};
