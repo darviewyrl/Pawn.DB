@@ -61,6 +61,8 @@ native bool:pdb_setup_driver(PDBSetup:setup, PDB_DRIVER:driver);
 native bool:pdb_setup_ssl(PDBSetup:setup, const ca_cert[], const client_cert[] = "",
                           const client_key[] = "", bool:verify_server = true);
 native bool:pdb_is_update_available();
+native pdb_hash(const password[], const callback[], const specifiers[] = "", {Float, _}:...);
+native pdb_verify(const password[], const hash[], const callback[], const specifiers[] = "", {Float, _}:...);
 native pdb_get_stat(PDB:handle, PDB_METRIC:metric_type);
 native bool:pdb_get_metrics(PDB:handle, &qps, &pending, &avg_latency_us, &slow_queries);
 native bool:pdb_set_slow_query_threshold(PDB:handle, threshold_us);

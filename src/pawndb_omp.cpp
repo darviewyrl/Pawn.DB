@@ -1,5 +1,6 @@
 #include <pawndb/lifecycle.hpp>
 #include <pawndb/connection_natives.hpp>
+#include <pawndb/crypto.hpp>
 #include <pawndb/mariadb_pool.hpp>
 #include <pawndb/postgres_pool.hpp>
 #include <pawndb/update_checker.hpp>
@@ -178,6 +179,10 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
             return false;
           *output = value;
           return true;
+        }, [this](AMX* amx, std::string password, std::string encoded, bool verify,
+                  pawndb::ConnectionNatives::CryptoCompletion completion) {
+          return crypto_.submit(amx, std::move(password), std::move(encoded), verify,
+                                std::move(completion));
         });
   }
 
@@ -199,6 +204,7 @@ class PawnDbComponent final : public IComponent, public PawnEventHandler, public
   ICore* core_ = nullptr;
   IPawnComponent* pawn_ = nullptr;
   pawndb::Lifecycle lifecycle_;
+  pawndb::CryptoEngine crypto_{lifecycle_};
   std::unique_ptr<pawndb::ConnectionManager> connections_;
   std::unique_ptr<pawndb::ConnectionNatives> natives_;
   pawndb::UpdateChecker update_checker_;

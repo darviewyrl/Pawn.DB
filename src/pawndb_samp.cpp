@@ -1,5 +1,6 @@
 #include <pawndb/lifecycle.hpp>
 #include <pawndb/connection_natives.hpp>
+#include <pawndb/crypto.hpp>
 #include <pawndb/mariadb_pool.hpp>
 #include <pawndb/postgres_pool.hpp>
 #include <pawndb/update_checker.hpp>
@@ -12,6 +13,7 @@
 namespace {
 
 pawndb::Lifecycle lifecycle;
+pawndb::CryptoEngine crypto{lifecycle};
 pawndb::UpdateChecker update_checker;
 decltype(&amx_Register) register_natives = nullptr;
 decltype(&amx_GetAddr) get_addr = nullptr;
@@ -137,6 +139,10 @@ PLUGIN_EXPORT bool PLUGIN_CALL Load(void** data) {
         if (get_addr(amx, address, &output) != AMX_ERR_NONE) return false;
         *output = value;
         return true;
+      }, [](AMX* amx, std::string password, std::string encoded, bool verify,
+            pawndb::ConnectionNatives::CryptoCompletion completion) {
+        return crypto.submit(amx, std::move(password), std::move(encoded), verify,
+                             std::move(completion));
       });
   return true;
 }

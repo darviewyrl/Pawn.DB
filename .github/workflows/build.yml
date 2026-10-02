@@ -26,6 +26,11 @@ jobs:
           ./telemetry_tsan
           g++ -std=c++20 -pthread -fsanitize=thread -fPIE -pie -g -Iinclude -Ithird_party/json/include tests/shutdown_check.cpp -o shutdown_tsan
           ./shutdown_tsan
+      - name: Check Argon2id native pipeline with TSan
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev
+          bash ci/check-crypto.sh thread
   worker-asan:
     runs-on: ubuntu-24.04
     steps:
@@ -46,6 +51,11 @@ jobs:
           ./telemetry_asan
           g++ -std=c++20 -pthread -fsanitize=address -fno-omit-frame-pointer -g -Iinclude -Ithird_party/json/include tests/shutdown_check.cpp -o shutdown_asan
           ./shutdown_asan
+      - name: Check Argon2id native pipeline with ASan and leak detection
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev
+          ASAN_OPTIONS=detect_leaks=1 bash ci/check-crypto.sh address
   build:
     name: ${{ matrix.target }} ${{ matrix.os }} ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}

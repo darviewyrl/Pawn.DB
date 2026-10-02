@@ -9,6 +9,7 @@
 #include <charconv>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -37,15 +38,18 @@ class ConnectionNatives {
   using CallbackArg = std::variant<cell, std::string>;
   using InvokeCallback = std::function<void(AMX*, std::string_view,
                                             const std::vector<CallbackArg>&)>;
+  using CryptoCompletion = std::function<void(std::string, bool)>;
+  using CryptoSubmit = std::function<bool(AMX*, std::string, std::string, bool, CryptoCompletion)>;
 
   ConnectionNatives(ConnectionManager& manager, Read read, Write write,
                     UpdateAvailable update_available, StringLength string_length = {},
                     StringCopy string_copy = {}, InvokeCallback invoke_callback = {},
-                    CellWrite cell_write = {})
+                    CellWrite cell_write = {}, CryptoSubmit crypto_submit = {})
       : manager_(manager), read_(std::move(read)), write_(std::move(write)),
         update_available_(std::move(update_available)),
         string_length_(std::move(string_length)), string_copy_(std::move(string_copy)),
-        invoke_callback_(std::move(invoke_callback)), cell_write_(std::move(cell_write)) {
+        invoke_callback_(std::move(invoke_callback)), cell_write_(std::move(cell_write)),
+        crypto_submit_(std::move(crypto_submit)) {
     current_ = this;
   }
   ~ConnectionNatives() { current_ = nullptr; }
@@ -81,17 +85,70 @@ class ConnectionNatives {
         {"pdb_free_batch_result", free_batch_result}, {"pdb_batch_size", batch_size},
         {"pdb_batch_status", batch_status}, {"pdb_batch_get_result", batch_get_result},
         {"pdb_batch_get_error", batch_get_error},
+        {"pdb_hash", hash}, {"pdb_verify", verify},
         {nullptr, nullptr}};
     return natives;
   }
 
-  static constexpr int native_count = 52;
+  static constexpr int native_count = 54;
 
   SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
     return format_at(amx, params, 1, 4, 5);
   }
 
  private:
+  static cell AMX_NATIVE_CALL hash(AMX* amx, NativeParams params) {
+    return current_ && current_->submit_crypto(amx, params, false);
+  }
+  static cell AMX_NATIVE_CALL verify(AMX* amx, NativeParams params) {
+    return current_ && current_->submit_crypto(amx, params, true);
+  }
+
+  bool submit_crypto(AMX* amx, NativeParams params, bool verifying) const {
+    const auto count = argc(params);
+    const int callback_index = verifying ? 3 : 2;
+    const int first_variadic = callback_index + 2;
+    if (!amx || !crypto_submit_ || !invoke_callback_ || count < callback_index) return false;
+    try {
+      std::string password, encoded, callback, specifiers;
+      if (!read_(amx, params[1], password) ||
+          (verifying && !read_(amx, params[2], encoded)) ||
+          !read_(amx, params[callback_index], callback) || callback.empty() ||
+          (count >= callback_index + 1 && !read_(amx, params[callback_index + 1], specifiers)))
+        return false;
+      if (specifiers.size() > static_cast<std::size_t>(std::max(0, count - first_variadic + 1)))
+        return false;
+      std::vector<CallbackArg> args;
+      for (std::size_t i = 0; i < specifiers.size(); ++i) {
+        const cell address = params[first_variadic + static_cast<int>(i)];
+        if (specifiers[i] == 's') {
+          std::string text;
+          if (!read_(amx, address, text)) return false;
+          args.emplace_back(std::move(text));
+        } else if (specifiers[i] == 'd' || specifiers[i] == 'i' || specifiers[i] == 'f') {
+          const auto end = static_cast<std::int64_t>(address) + static_cast<std::int64_t>(sizeof(cell));
+          if (address < 0 || address % static_cast<cell>(sizeof(cell)) ||
+              !((end <= amx->hea) || (address >= amx->stk && end <= amx->stp))) return false;
+          const auto* data = amx->data ? amx->data : amx->base
+              ? amx->base + reinterpret_cast<const AMX_HEADER*>(amx->base)->dat : nullptr;
+          if (!data) return false;
+          cell value = 0;
+          std::memcpy(&value, data + address, sizeof(value));
+          args.emplace_back(value);
+        } else return false;
+      }
+      return crypto_submit_(amx, std::move(password), std::move(encoded), verifying,
+          [invoke = invoke_callback_, amx, callback = std::move(callback),
+           args = std::move(args), verifying](std::string hash, bool success) mutable {
+            try {
+              if (verifying) args.emplace_back(static_cast<cell>(success));
+              else args.emplace_back(std::move(hash));
+              invoke(amx, callback, args);
+            } catch (...) {}
+          });
+    } catch (...) { return false; }
+  }
+
   SqlFormatResult format_at(AMX* amx, NativeParams params, int handle_index,
                             int format_index, int first_variadic) const {
     return format_for_connection(amx, params,
@@ -708,6 +765,7 @@ class ConnectionNatives {
   StringCopy string_copy_;
   InvokeCallback invoke_callback_;
   CellWrite cell_write_;
+  CryptoSubmit crypto_submit_;
   inline static ConnectionNatives* current_ = nullptr;
 };
 

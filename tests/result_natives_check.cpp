@@ -65,7 +65,7 @@ int main() {
   cell zero_index[] = {2 * sizeof(cell), h, 5};
   cell field_name[] = {4 * sizeof(cell), h, 1, 203, 5};
 
-  if (pawndb::ConnectionNatives::native_count != 52 || !native("pdb_num_rows") ||
+  if (pawndb::ConnectionNatives::native_count != 54 || !native("pdb_num_rows") ||
       !native("pdb_has_next_result") || !native("pdb_next_result") ||
       !native("pdb_insert_id") || !native("pdb_affected_rows") ||
       !native("pdb_exec_time") || !native("pdb_warning_count") ||
