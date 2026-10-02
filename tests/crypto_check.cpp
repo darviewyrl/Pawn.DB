@@ -68,7 +68,12 @@ int main() {
     return cell{0};
   };
   if (call("pdb_hash", {10, 12, 13}) || call("pdb_hash", {10, 12, 13, 128})) return 1;
-  for (int i = 0; i < 100; ++i)
+#if defined(__SANITIZE_THREAD__)
+  constexpr int hash_jobs = 10;
+#else
+  constexpr int hash_jobs = 100;
+#endif
+  for (int i = 0; i < hash_jobs; ++i)
     if (!call("pdb_hash", {10, 12, 13, 4})) return 1;
   strings[10] = "changed after enqueue";
   memory[1] = 99;
@@ -82,7 +87,7 @@ int main() {
     }
     return done();
   };
-  if (!wait([&] { return hashes == 100; }) || !passed || first_hash == second_hash) return 1;
+  if (!wait([&] { return hashes == hash_jobs; }) || !passed || first_hash == second_hash) return 1;
   strings[10] = "secret";
   strings[16] = first_hash;
   // Verify sequentially so callback order does not depend on worker scheduling.
@@ -108,5 +113,5 @@ int main() {
   life.dispatch_tick();
   life.stop();
   if (!passed || stale_callbacks) return 1;
-  std::cout << "100 Argon2id hashes, correct/wrong/malformed verify, main-thread callbacks and unload guard passed\n";
+  std::cout << hash_jobs << " Argon2id hashes, correct/wrong/malformed verify, main-thread callbacks and unload guard passed\n";
 }
