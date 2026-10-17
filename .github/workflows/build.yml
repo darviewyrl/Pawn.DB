@@ -175,6 +175,6 @@ jobs:
           & cl @common /Ithird_party/json/include /Ithird_party/omp-pawn-compiler/source /Ithird_party/omp-pawn-compiler/source/linux /DHAVE_STDINT_H=1 /DPAWN_CELL_SIZE=32 /DPAWNDB_OMP=1 tests/json_spatial_format_check.cpp amx_format_asan.obj /Fe:json_spatial_format_asan.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\json_spatial_format_asan.exe
-          & cl @common /Ithird_party/json/include tests/result_extensions_check.cpp /Fe:result_extensions_asan.exe
+          & cl @common /Ithird_party/json/include /Ithird_party/omp-pawn-compiler/source /Ithird_party/omp-pawn-compiler/source/linux /DHAVE_STDINT_H=1 /DPAWN_CELL_SIZE=32 /DPAWNDB_OMP=1 tests/result_extensions_check.cpp /Fe:result_extensions_asan.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\result_extensions_asan.exe
