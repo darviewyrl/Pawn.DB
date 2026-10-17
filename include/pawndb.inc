@@ -45,6 +45,17 @@ enum PDBJson {
     PDB_JSON_INVALID = 0
 }
 
+native PDBJson:pdb_json_create(bool:retain = false);
+native bool:pdb_json_free(PDBJson:handle);
+native bool:pdb_json_retain(PDBJson:handle);
+native bool:pdb_json_set_int(PDBJson:handle, const key[], value);
+native bool:pdb_json_set_float(PDBJson:handle, const key[], Float:value);
+native bool:pdb_json_set_str(PDBJson:handle, const key[], const value[]);
+native bool:pdb_json_set_bool(PDBJson:handle, const key[], bool:value);
+native bool:pdb_json_set_vector(PDBJson:handle, const key[], Float:x, Float:y, Float:z);
+native bool:pdb_json_set_vector4(PDBJson:handle, const key[], Float:x, Float:y, Float:z, Float:w);
+native bool:pdb_json_to_string(PDBJson:handle, output[], max_len = sizeof(output));
+
 native PDB:pdb_connect(const host[], const user[], const password[], const database[],
                        port = 3306, PDBSetup:setup = INVALID_PDB_SETUP,
                        bool:auto_free_setup = true);

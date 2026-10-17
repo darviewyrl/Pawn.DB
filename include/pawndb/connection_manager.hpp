@@ -95,12 +95,39 @@ struct BatchConfiguration {
   std::vector<std::string> statements;
 };
 
+struct JsonObject {
+  void* owner;
+  nlohmann::json value = nlohmann::json::object();
+  bool retained;
+};
+
 class ConnectionManager {
  public:
   using Handle = HandleRegistry::Handle;
   using QueryCompletion = std::function<void(bool, DriverError, QueryResult)>;
   using ErrorSink = std::function<void(void*, Handle, int, std::string)>;
   using WarningSink = std::function<void(std::string)>;
+
+  class JsonScope {
+   public:
+    JsonScope(ConnectionManager& manager, void* amx)
+        : manager_(manager), owner_(amx), previous_(manager.json_scope_) {
+      manager_.json_scope_ = this;
+    }
+    JsonScope(const JsonScope&) = delete;
+    JsonScope& operator=(const JsonScope&) = delete;
+    ~JsonScope() {
+      manager_.json_scope_ = previous_;
+      for (const auto handle : handles_) manager_.release_scoped_json(owner_, handle);
+    }
+
+   private:
+    friend class ConnectionManager;
+    ConnectionManager& manager_;
+    void* owner_;
+    JsonScope* previous_;
+    std::vector<Handle> handles_;
+  };
 
   ConnectionManager(Lifecycle& life, ErrorSink error, WarningSink warning,
                     SessionFactory factory = {})
@@ -109,9 +136,22 @@ class ConnectionManager {
         handles_([this](Handle handle) {
           warnings_("[Pawn.DB Warning] Invalid connection handle (Handle: " +
                     std::to_string(static_cast<std::int32_t>(handle)) + ").");
-        }) {}
+        }) {
+    life_.tick_cleanup = [this] {
+      auto pending = std::move(pending_json_);
+      pending_json_.clear();
+      for (const auto& [amx, handles] : pending)
+        for (auto handle : handles) release_scoped_json(amx, handle);
+    };
+    errors_ = [this, error = std::move(errors_)](void* amx, Handle handle, int code,
+                                                std::string message) {
+      JsonScope scope(*this, amx);
+      error(amx, handle, code, std::move(message));
+    };
+  }
 
   ~ConnectionManager() {
+    life_.tick_cleanup = {};
     std::vector<void*> scripts;
     scripts.reserve(owners_.size());
     for (const auto& [script, _] : owners_) scripts.push_back(script);
@@ -549,6 +589,44 @@ class ConnectionManager {
     return true;
   }
 
+  Handle create_json(void* amx, bool retained) {
+    if (!amx || life_.context(amx).expired()) return 0;
+    Handle handle = 0;
+    try {
+      handle = handles_.insert(std::make_shared<JsonObject>(JsonObject{amx, nlohmann::json::object(), retained}));
+      if (!handle) return 0;
+      owners_[amx].insert(handle);
+      if (!retained) {
+        auto* scope = json_scope_;
+        while (scope && scope->owner_ != amx) scope = scope->previous_;
+        if (scope) scope->handles_.push_back(handle);
+        else pending_json_[amx].push_back(handle);
+      }
+      return handle;
+    } catch (...) {
+      if (handle) erase_json(amx, handle);
+      throw;
+    }
+  }
+
+  std::shared_ptr<JsonObject> json(void* amx, Handle handle) {
+    auto value = handles_.get<JsonObject>(handle, false);
+    if (value && value->owner == amx) return value;
+    warnings_("[Pawn.DB Warning] Invalid, stale or foreign PDBJson handle.");
+    return {};
+  }
+
+  bool retain_json(void* amx, Handle handle) {
+    auto value = json(amx, handle);
+    if (!value) return false;
+    value->retained = true;
+    return true;
+  }
+
+  bool free_json(void* amx, Handle handle) {
+    return json(amx, handle) && erase_json(amx, handle);
+  }
+
   std::shared_ptr<ResultObject> result(void* amx, Handle handle) {
     auto value = get_result(handle);
     return value && value->owner == amx ? value : nullptr;
@@ -597,6 +675,7 @@ class ConnectionManager {
     for (auto handle : pending) {
       if (!owners_[amx].contains(handle)) continue;
       if (handles_.get<SetupConfiguration>(handle, false)) free_setup(handle);
+      else if (handles_.get<JsonObject>(handle, false)) erase_json(amx, handle);
       else if (handles_.get<BatchConfiguration>(handle, false)) free_batch(amx, handle);
       else if (handles_.get<ResultObject>(handle, false)) erase_result(amx, handle);
       else if (auto result = handles_.get<BatchResultObject>(handle, false))
@@ -604,6 +683,7 @@ class ConnectionManager {
       else close(handle);
     }
     owners_.erase(it);
+    pending_json_.erase(amx);
   }
 
  private:
@@ -613,6 +693,19 @@ class ConnectionManager {
   SessionFactory factory_;
   HandleRegistry handles_;
   std::unordered_map<void*, std::unordered_set<Handle>> owners_;
+  JsonScope* json_scope_ = nullptr;
+  std::unordered_map<void*, std::vector<Handle>> pending_json_;
+
+  bool erase_json(void* amx, Handle handle) {
+    if (!handles_.erase<JsonObject>(handle)) return false;
+    if (auto owner = owners_.find(amx); owner != owners_.end()) owner->second.erase(handle);
+    return true;
+  }
+
+  void release_scoped_json(void* amx, Handle handle) {
+    auto value = handles_.get<JsonObject>(handle, false);
+    if (value && value->owner == amx && !value->retained) erase_json(amx, handle);
+  }
   std::atomic<bool> accepting_{true};
 
   std::shared_ptr<ResultObject> get_result(Handle handle) {

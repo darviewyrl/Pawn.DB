@@ -51,6 +51,13 @@ class ConnectionNatives {
         invoke_callback_(std::move(invoke_callback)), cell_write_(std::move(cell_write)),
         crypto_submit_(std::move(crypto_submit)) {
     current_ = this;
+    if (invoke_callback_) {
+      invoke_callback_ = [&manager, invoke = std::move(invoke_callback_)](
+          AMX* amx, std::string_view name, const std::vector<CallbackArg>& args) {
+        ConnectionManager::JsonScope scope(manager, amx);
+        invoke(amx, name, args);
+      };
+    }
   }
   ~ConnectionNatives() { current_ = nullptr; }
 
@@ -86,17 +93,123 @@ class ConnectionNatives {
         {"pdb_batch_status", batch_status}, {"pdb_batch_get_result", batch_get_result},
         {"pdb_batch_get_error", batch_get_error},
         {"pdb_hash", hash}, {"pdb_verify", verify},
+        {"pdb_json_create", json_create}, {"pdb_json_free", json_free},
+        {"pdb_json_retain", json_retain}, {"pdb_json_set_int", json_set_int},
+        {"pdb_json_set_float", json_set_float}, {"pdb_json_set_str", json_set_str},
+        {"pdb_json_set_bool", json_set_bool}, {"pdb_json_set_vector", json_set_vector},
+        {"pdb_json_set_vector4", json_set_vector4}, {"pdb_json_to_string", json_to_string},
         {nullptr, nullptr}};
     return natives;
   }
 
-  static constexpr int native_count = 54;
+  static constexpr int native_count = 64;
 
   SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
     return format_at(amx, params, 1, 4, 5);
   }
 
  private:
+  static bool json_warning() noexcept {
+    try {
+      if (current_) current_->manager_.report_format_error("[Pawn.DB Warning] Invalid JSON arguments or operation failed.");
+    } catch (...) {}
+    return false;
+  }
+
+  static cell AMX_NATIVE_CALL json_create(AMX* amx, NativeParams params) {
+    try {
+      if (!current_ || argc(params) != 1) return json_warning();
+      const auto handle = current_->manager_.create_json(amx, params[1] != 0);
+      return handle ? static_cast<cell>(handle) : static_cast<cell>(json_warning());
+    } catch (...) { return json_warning(); }
+  }
+
+  template <bool Retain>
+  static cell json_lifecycle(AMX* amx, NativeParams params) {
+    try {
+      if (!current_ || !amx || argc(params) != 1) return json_warning();
+      return Retain ? current_->manager_.retain_json(amx, static_cast<std::uint32_t>(params[1]))
+                    : current_->manager_.free_json(amx, static_cast<std::uint32_t>(params[1]));
+    } catch (...) { return json_warning(); }
+  }
+  static cell AMX_NATIVE_CALL json_free(AMX* amx, NativeParams params) { return json_lifecycle<false>(amx, params); }
+  static cell AMX_NATIVE_CALL json_retain(AMX* amx, NativeParams params) { return json_lifecycle<true>(amx, params); }
+
+  static bool json_buffer(AMX* amx, cell address, std::size_t cells) {
+    if (!amx || address < 0 || address % sizeof(cell) || !cells) return false;
+    const auto end = static_cast<std::uint64_t>(address) + cells * sizeof(cell);
+    return end <= static_cast<std::uint64_t>(std::max(cell{0}, amx->hea)) ||
+           (address >= amx->stk && end <= static_cast<std::uint64_t>(std::max(cell{0}, amx->stp)));
+  }
+
+  bool json_string(AMX* amx, cell address, std::string& output) const {
+    if (!json_buffer(amx, address, 1)) return false;
+    const auto* data = amx->data ? amx->data : amx->base
+        ? amx->base + reinterpret_cast<const AMX_HEADER*>(amx->base)->dat : nullptr;
+    if (!data) return false;
+    const auto limit = address < amx->hea ? amx->hea : amx->stp;
+    cell value = 0;
+    std::memcpy(&value, data + address, sizeof(value));
+    const bool packed = static_cast<ucell>(value) > 0xff;
+    for (auto pos = static_cast<std::int64_t>(address); pos + sizeof(cell) <= limit; pos += sizeof(cell)) {
+      std::memcpy(&value, data + pos, sizeof(value));
+      if (!value || (packed && (!(value & 0xff) || !(value & 0xff00) ||
+                                !(value & 0xff0000) || !(static_cast<ucell>(value) & 0xff000000))))
+        return read_ && read_(amx, address, output);
+    }
+    return false;
+  }
+
+  template <char Kind, int Count>
+  static cell json_set(AMX* amx, NativeParams params) {
+    try {
+      if (!current_ || !amx || argc(params) != Count) return json_warning();
+      auto object = current_->manager_.json(amx, static_cast<std::uint32_t>(params[1]));
+      if (!object) return false;
+      std::string key;
+      if (!current_->json_string(amx, params[2], key)) return json_warning();
+      nlohmann::json value;
+      if constexpr (Kind == 'i') value = params[3];
+      else if constexpr (Kind == 'b') value = params[3] != 0;
+      else if constexpr (Kind == 's') {
+        std::string text;
+        if (!current_->json_string(amx, params[3], text)) return json_warning();
+        value = std::move(text);
+      } else {
+        if constexpr (Kind == 'v') value = nlohmann::json::array();
+        for (int i = 3; i <= Count; ++i) {
+          const auto number = std::bit_cast<float>(params[i]);
+          if (!std::isfinite(number)) return json_warning();
+          if constexpr (Kind == 'v') value.push_back(number);
+          else value = number;
+        }
+      }
+      object->value.get_ref<nlohmann::json::object_t&>().insert_or_assign(std::move(key), std::move(value));
+      return true;
+    } catch (...) { return json_warning(); }
+  }
+  static cell AMX_NATIVE_CALL json_set_int(AMX* amx, NativeParams p) { return json_set<'i', 3>(amx, p); }
+  static cell AMX_NATIVE_CALL json_set_float(AMX* amx, NativeParams p) { return json_set<'f', 3>(amx, p); }
+  static cell AMX_NATIVE_CALL json_set_str(AMX* amx, NativeParams p) { return json_set<'s', 3>(amx, p); }
+  static cell AMX_NATIVE_CALL json_set_bool(AMX* amx, NativeParams p) { return json_set<'b', 3>(amx, p); }
+  static cell AMX_NATIVE_CALL json_set_vector(AMX* amx, NativeParams p) { return json_set<'v', 5>(amx, p); }
+  static cell AMX_NATIVE_CALL json_set_vector4(AMX* amx, NativeParams p) { return json_set<'v', 6>(amx, p); }
+
+  static cell AMX_NATIVE_CALL json_to_string(AMX* amx, NativeParams params) {
+    try {
+      if (!current_ || !amx || argc(params) != 3 || !current_->write_) return json_warning();
+      if (params[3] <= 0) return json_warning();
+      const auto capacity = static_cast<std::size_t>(params[3]);
+      if (!json_buffer(amx, params[2], capacity)) return json_warning();
+      if (!current_->write_(amx, params[2], "", capacity)) return json_warning();
+      auto object = current_->manager_.json(amx, static_cast<std::uint32_t>(params[1]));
+      if (!object) return false;
+      const auto text = object->value.dump();
+      const bool written = current_->write_(amx, params[2], text, capacity);
+      return written && text.size() < capacity;
+    } catch (...) { return json_warning(); }
+  }
+
   static cell AMX_NATIVE_CALL hash(AMX* amx, NativeParams params) {
     return current_ && current_->submit_crypto(amx, params, false);
   }

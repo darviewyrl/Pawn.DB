@@ -43,8 +43,11 @@ class Lifecycle {
     return pool_.get();
   }
   WorkerPool* active_worker_pool() const noexcept { return pool_.get(); }
+  Work tick_cleanup;
   void dispatch_tick() {
-    if (!running_ || !pool_ || std::this_thread::get_id() != main_thread_) return;
+    if (!running_ || std::this_thread::get_id() != main_thread_) return;
+    if (tick_cleanup) tick_cleanup();
+    if (!pool_) return;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
     for (int n = 0; n < 64 && std::chrono::steady_clock::now() < deadline; ++n) {
       auto result = pool_->take_completed();
