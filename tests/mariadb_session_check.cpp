@@ -1,5 +1,6 @@
 #include <pawndb/mariadb_pool.hpp>
 #include <pawndb/lifecycle.hpp>
+#include "result_db_roundtrip.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -31,6 +32,7 @@ int main(int argc, char** argv) {
   auto context = life.context(&amx);
   auto* worker = life.worker_pool();
   bool done = false, passed = false, tick_slow = false;
+  pawndb::QueryResult spatial_result;
   if (!worker->submit(0, pawndb::WorkerPool::Priority::normal, [&, worker] {
         pawndb::DriverError error;
         auto sessions = pawndb::MariaPool::open(config, error);
@@ -60,6 +62,13 @@ int main(int argc, char** argv) {
                    sessions->query("SELECT SLEEP(0.2)", query_error) &&
                    !sessions->query("INVALID SQL", query_error) && query_error.code > 0 &&
                    sessions->query("SELECT 1", query_error);
+          const std::array<cell, 4> coords{std::bit_cast<cell>(1532.125f), std::bit_cast<cell>(-1688.5432f),
+              std::bit_cast<cell>(13.5f), std::bit_cast<cell>(270.0f)};
+          const pawndb::EscapeSnapshot escape{pawndb::Backend::mariadb, sessions};
+          const auto vector_sql = pawndb::format_sql("%v4", coords,
+              [](std::int32_t) -> std::optional<std::string_view> { return std::nullopt; }, &escape);
+          passed = passed && vector_sql && sessions->query_result(
+              "SELECT " + std::string(vector_sql.sql.view()) + " AS position", query_error, spatial_result);
         } else if (!online) {
           passed = !sessions && error.code > 0 && !error.message.empty();
         }
@@ -74,5 +83,6 @@ int main(int argc, char** argv) {
     std::this_thread::yield();
   }
   life.stop();
+  if (online && passed) passed = check_spatial_db_roundtrip(std::move(spatial_result));
   return done && passed && !tick_slow ? 0 : 1;
 }

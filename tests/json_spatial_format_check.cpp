@@ -41,9 +41,20 @@ struct Pool final : pawndb::SessionPool {
   }
 };
 cell connection_handle = 0;
+pawndb::ConnectionManager* fixture_manager = nullptr;
 cell AMX_NATIVE_CALL fixture_connection(AMX*, pawndb::NativeParams) { return connection_handle; }
+cell AMX_NATIVE_CALL fixture_result(AMX* amx, pawndb::NativeParams) {
+  if (!fixture_manager) return 0;
+  pawndb::QueryResult result;
+  result.fields = {"doc", "vec", "vec4"};
+  result.rows = {{R"({"inventory":{"slots":[{"attributes":{"durability":1}},{"attributes":{"durability":2}},{"attributes":{"durability":12}}]},"truth":true,"ratio":1.25,"name":"pawn","id":18446744073709551615,"position":[1,2,3],"transform":[4,5,6,7]})",
+                  "1532.125,-1688.5432,13.5", "1532.125,-1688.5432,13.5,270"}};
+  return static_cast<cell>(fixture_manager->create_result(amx, std::move(result)));
+}
 cell AMX_NATIVE_CALL probe(AMX* amx, pawndb::NativeParams p) {
-  if (!p[1]) amx_RaiseError(amx, AMX_ERR_ASSERT);
+  static int call = 0;
+  if (!p[1]) { std::cerr << "Pawn probe failed: " << ++call << '\n'; amx_RaiseError(amx, AMX_ERR_ASSERT); }
+  else ++call;
   return p[1];
 }
 cell AMX_NATIVE_CALL equal(AMX* amx, pawndb::NativeParams p) {
@@ -56,6 +67,12 @@ cell AMX_NATIVE_CALL equal(AMX* amx, pawndb::NativeParams p) {
   amx_GetString(first.data(), a, 0, first.size()); amx_GetString(second.data(), b, 0, second.size());
   if (first != second) std::cerr << first.c_str() << " != " << second.c_str() << '\n';
   return first == second;
+}
+cell AMX_NATIVE_CALL vector_close(AMX*, pawndb::NativeParams p) {
+  const float x = std::bit_cast<float>(p[1]), y = std::bit_cast<float>(p[2]), z = std::bit_cast<float>(p[3]);
+  if (!(std::abs(x - 1532.125f) < 1e-4f && std::abs(y + 1688.5432f) < 1e-4f && std::abs(z - 13.5f) < 1e-4f))
+    std::cerr << "vector values: " << x << ',' << y << ',' << z << '\n';
+  return std::abs(x - 1532.125f) < 1e-4f && std::abs(y + 1688.5432f) < 1e-4f && std::abs(z - 13.5f) < 1e-4f;
 }
 }
 
@@ -116,6 +133,7 @@ int main(int argc, char** argv) {
   int warnings = 0, payload_reads = 0, callbacks = 0;
   ConnectionManager manager(life, [](void*, auto, int, auto) {}, [&](auto) { ++warnings; },
       [&](const ConnectionConfig& config, auto&) { return std::make_shared<Pool>(state, config.backend); });
+  fixture_manager = &manager;
   ConnectionNatives natives(manager,
       [](AMX* script, cell address, std::string& text) {
         cell* ptr = nullptr; int length = 0;
@@ -155,6 +173,19 @@ int main(int argc, char** argv) {
       if (!std::strcmp(item->name, name)) return item->func(&amx, params.data());
     return cell{0};
   };
+  const auto spatial_sql = format_sql("%v4", vector, read, &my);
+  CHECK(spatial_sql && spatial_sql.sql.view().front() == '\'' && spatial_sql.sql.view().back() == '\'');
+  QueryResult persisted;
+  persisted.fields = {"position"};
+  persisted.rows = {{std::string(spatial_sql.sql.view().substr(1, spatial_sql.sql.view().size() - 2))}};
+  const auto persisted_handle = manager.create_result(&amx, std::move(persisted));
+  CHECK(persisted_handle && call("pdb_next_row", {static_cast<cell>(persisted_handle)}));
+  constexpr cell rx = 2800 * sizeof(cell), ry = 2801 * sizeof(cell), rz = 2802 * sizeof(cell), rw = 2803 * sizeof(cell);
+  CHECK(call("pdb_get_vector4_by_index", {static_cast<cell>(persisted_handle), 0, rx, ry, rz, rw}));
+  auto roundtrip = [&](cell address) { return std::bit_cast<float>(memory[static_cast<std::size_t>(address / sizeof(cell))]); };
+  CHECK(std::abs(roundtrip(rx) - 1500.5f) < 1e-4f && std::abs(roundtrip(ry) + 1200.25f) < 1e-4f &&
+        std::abs(roundtrip(rz) - 15.125f) < 1e-4f && std::abs(roundtrip(rw) - 90.0f) < 1e-4f);
+  CHECK(call("pdb_free_result", {static_cast<cell>(persisted_handle)}));
   const auto format = store(0, "SELECT ' %j ', '%v3'"), payload = cell{512};
   const auto output = cell{2000 * sizeof(cell)};
   const auto json = manager.create_json(&amx, true);
@@ -213,7 +244,7 @@ int main(int argc, char** argv) {
     program.resize(static_cast<std::size_t>(hdr->stp) + 4096);
     AMX script{}; CHECK(amx_Init(&script, program.data()) == AMX_ERR_NONE);
     CHECK(life.attach(&script));
-    const AMX_NATIVE_INFO fixtures[] = {{"fixture_connection", fixture_connection}, {"probe", probe}, {"equal", equal}, {nullptr, nullptr}};
+    const AMX_NATIVE_INFO fixtures[] = {{"fixture_connection", fixture_connection}, {"fixture_result", fixture_result}, {"probe", probe}, {"equal", equal}, {"vector_close", vector_close}, {nullptr, nullptr}};
     amx_Register(&script, fixtures, -1);
     CHECK(amx_Register(&script, natives.table(), natives.native_count) == AMX_ERR_NONE);
     // Use a connection owned by the running AMX, not the synthetic test AMX.

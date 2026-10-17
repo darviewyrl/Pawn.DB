@@ -5,6 +5,7 @@
 #include <amx/amx.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <charconv>
 #include <cctype>
@@ -86,6 +87,11 @@ class ConnectionNatives {
         {"pdb_get_float_by_index", get_float_by_index},
         {"pdb_get_str_by_index", get_str_by_index},
         {"pdb_get_bool_by_index", get_bool_by_index},
+        {"pdb_json_get_int", json_get_int}, {"pdb_json_get_float", json_get_float},
+        {"pdb_json_get_bool", json_get_bool}, {"pdb_json_get_str", json_get_str},
+        {"pdb_json_get_vector", json_get_vector}, {"pdb_json_get_vector4", json_get_vector4},
+        {"pdb_get_vector", get_vector}, {"pdb_get_vector_by_index", get_vector_by_index},
+        {"pdb_get_vector4", get_vector4}, {"pdb_get_vector4_by_index", get_vector4_by_index},
         {"pdb_batch_create", batch_create}, {"pdb_batch_free", batch_free},
         {"pdb_batch_add", batch_add}, {"pdb_batch_execute", batch_execute},
         {"pdb_retain_batch_result", retain_batch_result},
@@ -102,7 +108,7 @@ class ConnectionNatives {
     return natives;
   }
 
-  static constexpr int native_count = 64;
+  static constexpr int native_count = 74;
 
   SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
     return format_at(amx, params, 1, 4, 5);
@@ -142,7 +148,7 @@ class ConnectionNatives {
            (address >= amx->stk && end <= static_cast<std::uint64_t>(std::max(cell{0}, amx->stp)));
   }
 
-  static const unsigned char* amx_data(AMX* amx) {
+  static unsigned char* amx_data(AMX* amx) {
     return amx->data ? amx->data : amx->base
         ? amx->base + reinterpret_cast<const AMX_HEADER*>(amx->base)->dat : nullptr;
   }
@@ -155,7 +161,7 @@ class ConnectionNatives {
 
   static bool string_address(AMX* amx, cell address) {
     if (!amx_buffer(amx, address, 1)) return false;
-    const auto* data = amx_data(amx);
+    auto* data = amx_data(amx);
     if (!data) return false;
     const auto limit = address < amx->hea ? amx->hea : amx->stp;
     cell value = 0;
@@ -905,6 +911,217 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
   static cell get_str_by_index(AMX* amx, NativeParams params) {
     return string(amx, params, 2, 3, 4, false);
   }
+
+  static void extraction_warning(std::string_view text) noexcept {
+    try { if (current_) current_->manager_.report_format_error(
+        "[Pawn.DB Warning] JSON/spatial extraction failed: " + std::string(text) + "."); }
+    catch (...) {}
+  }
+
+  static const nlohmann::json* resolve_json_path(const nlohmann::json& root, std::string_view path) {
+    if (path.empty() || path.front() != '$') return nullptr;
+    const nlohmann::json* node = &root;
+    std::size_t pos = 1;
+    while (pos < path.size()) {
+      if (path[pos] == '.') {
+        const auto begin = ++pos;
+        while (pos < path.size() && path[pos] != '.' && path[pos] != '[') {
+          if (std::isspace(static_cast<unsigned char>(path[pos])) || path[pos] == ']') return nullptr;
+          ++pos;
+        }
+        if (pos == begin || !node->is_object()) return nullptr;
+        const auto it = node->find(path.substr(begin, pos - begin));
+        if (it == node->end()) return nullptr;
+        node = &*it;
+      } else if (path[pos] == '[') {
+        ++pos;
+        if (pos == path.size()) return nullptr;
+        if (path[pos] == '\'' || path[pos] == '"') {
+          const char quote = path[pos++];
+          std::string key;
+          bool closed = false;
+          while (pos < path.size()) {
+            const char ch = path[pos++];
+            if (ch == quote) { closed = true; break; }
+            if (ch == '\\') {
+              if (pos == path.size() || (path[pos] != quote && path[pos] != '\\')) return nullptr;
+              key.push_back(path[pos++]);
+            } else key.push_back(ch);
+          }
+          if (!closed || pos == path.size() || path[pos++] != ']' || !node->is_object()) return nullptr;
+          const auto it = node->find(key);
+          if (it == node->end()) return nullptr;
+          node = &*it;
+        } else {
+          std::size_t index = 0;
+          const auto begin = pos;
+          while (pos < path.size() && path[pos] >= '0' && path[pos] <= '9') {
+            const auto digit = static_cast<std::size_t>(path[pos++] - '0');
+            if (index > (std::numeric_limits<std::size_t>::max() - digit) / 10) return nullptr;
+            index = index * 10 + digit;
+          }
+          if (pos == begin || pos == path.size() || path[pos++] != ']' || !node->is_array() || index >= node->size()) return nullptr;
+          node = &(*node)[index];
+        }
+      } else return nullptr;
+    }
+    return node;
+  }
+
+  static std::optional<nlohmann::json> json_value_at(AMX* amx, NativeParams params) {
+    if (!current_ || argc(params) < 3) return {};
+    const auto result = get_result(amx, params);
+    if (!result) return {};
+    std::string name, path;
+    if (!read_field_name(amx, params[2], name) || !read_field_name(amx, params[3], path)) return {};
+    const auto index = column(*result, name);
+    const auto* field = index ? value(*result, *index) : nullptr;
+    if (!field || !*field) return {};
+    try {
+      auto root = nlohmann::json::parse(**field, nullptr, false);
+      const auto* target = root.is_discarded() ? nullptr : resolve_json_path(root, path);
+      return target ? std::optional<nlohmann::json>(*target) : std::nullopt;
+    } catch (...) { return {}; }
+  }
+
+  static std::optional<float> as_float(const nlohmann::json& value) {
+    if (!value.is_number()) return {};
+    const double number = value.get<double>();
+    if (!std::isfinite(number) || number > std::numeric_limits<float>::max() ||
+        number < -std::numeric_limits<float>::max()) return {};
+    const float output = static_cast<float>(number);
+    return std::isfinite(output) ? std::optional<float>(output) : std::nullopt;
+  }
+
+  static cell json_number(AMX* amx, NativeParams params, char kind) {
+    try {
+    if (argc(params) != 3) return 0;
+    const auto target = json_value_at(amx, params);
+    if (!target) { extraction_warning("invalid result, JSON, or path"); return 0; }
+    if (kind == 'b') return target->is_boolean() && target->get<bool>();
+    if (kind == 'f') {
+      const auto output = as_float(*target);
+      return output ? std::bit_cast<cell>(*output) : 0;
+    }
+    if (!target->is_number()) return 0;
+    long double number;
+    if (target->is_number_unsigned()) number = target->get<std::uint64_t>();
+    else if (target->is_number_integer()) number = target->get<std::int64_t>();
+    else {
+      const double real = target->get<double>();
+      if (!std::isfinite(real) || std::trunc(real) != real) return 0;
+      number = real;
+    }
+    if (number < std::numeric_limits<cell>::min() || number > std::numeric_limits<cell>::max()) {
+      extraction_warning("integer exceeds signed 32-bit range");
+      return 0;
+    }
+    return static_cast<cell>(number);
+    } catch (...) { extraction_warning("native could not allocate or convert JSON value"); return 0; }
+  }
+
+  static cell AMX_NATIVE_CALL json_get_int(AMX* amx, NativeParams params) { return json_number(amx, params, 'i'); }
+  static cell AMX_NATIVE_CALL json_get_float(AMX* amx, NativeParams params) { return json_number(amx, params, 'f'); }
+  static cell AMX_NATIVE_CALL json_get_bool(AMX* amx, NativeParams params) { return json_number(amx, params, 'b'); }
+
+  static cell AMX_NATIVE_CALL json_get_str(AMX* amx, NativeParams params) {
+    try {
+    if (!current_ || argc(params) != 5 || params[5] <= 0 || !current_->write_) return 0;
+    const auto target = json_value_at(amx, params);
+    std::string output;
+    const bool valid = target && (target->is_string() || target->is_number_integer() ||
+        target->is_number_unsigned() || target->is_object() || target->is_array());
+    if (valid) output = target->is_string() ? target->get<std::string>() : target->dump();
+    if (!write_string(amx, params[4], valid ? std::string_view(output) : std::string_view{},
+                      static_cast<std::size_t>(params[5]))) return 0;
+    if (!target) extraction_warning("invalid result, JSON, or path");
+    return valid && output.size() < static_cast<std::size_t>(params[5]);
+    } catch (...) {
+      if (current_ && argc(params) == 5 && params[5] > 0)
+        write_string(amx, params[4], {}, static_cast<std::size_t>(params[5]));
+      extraction_warning("native could not serialize JSON value"); return 0;
+    }
+  }
+
+  static bool write_amx_cell(AMX* amx, cell address, cell value) {
+    if (!amx_buffer(amx, address, 1)) return false;
+    auto* data = amx_data(amx);
+    if (!data) return false;
+    std::memcpy(data + address, &value, sizeof(value));
+    return true;
+  }
+
+  template <int Count>
+  static cell json_vector(AMX* amx, NativeParams params) {
+    try {
+    if (!current_ || argc(params) != Count + 3) return false;
+    std::array<bool, Count> accessible{};
+    for (int i = 0; i < Count; ++i) accessible[i] = amx_buffer(amx, params[4 + i], 1);
+    const auto target = json_value_at(amx, params);
+    std::array<float, Count> output{};
+    bool valid = target && target->is_array() && target->size() == Count;
+    if (valid) for (int i = 0; i < Count; ++i) {
+      const auto number = as_float((*target)[i]);
+      if (!number) { valid = false; break; }
+      output[i] = *number;
+    }
+    for (int i = 0; i < Count; ++i)
+      if (accessible[i]) write_amx_cell(amx, params[4 + i], std::bit_cast<cell>(valid ? output[i] : 0.0f));
+    if (!valid) extraction_warning("invalid JSON vector or component");
+    return valid && std::all_of(accessible.begin(), accessible.end(), [](bool item) { return item; });
+    } catch (...) {
+      for (int i = 0; i < Count; ++i)
+        if (amx_buffer(amx, params[4 + i], 1)) write_amx_cell(amx, params[4 + i], 0);
+      extraction_warning("native could not convert JSON vector"); return 0;
+    }
+  }
+  static cell AMX_NATIVE_CALL json_get_vector(AMX* amx, NativeParams p) { return json_vector<3>(amx, p); }
+  static cell AMX_NATIVE_CALL json_get_vector4(AMX* amx, NativeParams p) { return json_vector<4>(amx, p); }
+
+  template <int Count>
+  static cell spatial_vector(AMX* amx, NativeParams params, bool by_name) {
+    try {
+    if (!current_ || argc(params) != Count + 2) return false;
+    constexpr int first_output = 3;
+    std::array<bool, Count> accessible{};
+    for (int i = 0; i < Count; ++i) accessible[i] = amx_buffer(amx, params[first_output + i], 1);
+    auto result = get_result(amx, params);
+    std::optional<std::size_t> index;
+    if (result && by_name) {
+      std::string name;
+      if (read_field_name(amx, params[2], name)) index = column(*result, name);
+    } else if (result) index = column(*result, params[2]);
+    const auto* field = result && index ? value(*result, *index) : nullptr;
+    std::array<float, Count> output{};
+    bool valid = field && *field;
+    if (valid) {
+      const std::string_view text(**field);
+      std::size_t pos = 0;
+      for (int i = 0; i < Count; ++i) {
+        const auto end = i + 1 == Count ? text.size() : text.find(',', pos);
+        if (end == std::string_view::npos || end == pos) { valid = false; break; }
+        const auto parsed = std::from_chars(text.data() + pos, text.data() + end,
+                                             output[i], std::chars_format::general);
+        if (parsed.ec != std::errc{} || parsed.ptr != text.data() + end || !std::isfinite(output[i])) {
+          valid = false; break;
+        }
+        pos = end + 1;
+      }
+      if (valid && pos != text.size() + 1) valid = false;
+    }
+    for (int i = 0; i < Count; ++i)
+      if (accessible[i]) write_amx_cell(amx, params[first_output + i], std::bit_cast<cell>(valid ? output[i] : 0.0f));
+    return valid && std::all_of(accessible.begin(), accessible.end(), [](bool item) { return item; });
+    } catch (...) {
+      for (int i = 0; i < Count; ++i)
+        if (amx_buffer(amx, params[3 + i], 1)) write_amx_cell(amx, params[3 + i], 0);
+      extraction_warning("native could not parse spatial value"); return 0;
+    }
+  }
+  static cell AMX_NATIVE_CALL get_vector(AMX* amx, NativeParams p) { return spatial_vector<3>(amx, p, true); }
+  static cell AMX_NATIVE_CALL get_vector_by_index(AMX* amx, NativeParams p) { return spatial_vector<3>(amx, p, false); }
+  static cell AMX_NATIVE_CALL get_vector4(AMX* amx, NativeParams p) { return spatial_vector<4>(amx, p, true); }
+  static cell AMX_NATIVE_CALL get_vector4_by_index(AMX* amx, NativeParams p) { return spatial_vector<4>(amx, p, false); }
 
   ConnectionManager& manager_;
   Read read_;

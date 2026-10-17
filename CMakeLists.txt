@@ -183,6 +183,13 @@ target_compile_definitions(pawndb_result_natives_check PRIVATE
 target_link_libraries(pawndb_result_natives_check PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
 add_test(NAME result_natives_check COMMAND pawndb_result_natives_check)
 
+add_executable(pawndb_result_extensions_check tests/result_extensions_check.cpp)
+target_include_directories(pawndb_result_extensions_check PRIVATE
+  include third_party/omp-pawn-compiler/source third_party/omp-pawn-compiler/source/linux)
+target_compile_definitions(pawndb_result_extensions_check PRIVATE HAVE_STDINT_H=1 PAWN_CELL_SIZE=32 PAWNDB_OMP=1)
+target_link_libraries(pawndb_result_extensions_check PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+add_test(NAME result_extensions_check COMMAND pawndb_result_extensions_check)
+
 add_executable(pawndb_async_query_check tests/async_query_check.cpp)
 target_include_directories(pawndb_async_query_check PRIVATE
   include third_party/omp-pawn-compiler/source third_party/omp-pawn-compiler/source/linux)
@@ -245,10 +252,16 @@ target_include_directories(pawndb_sql_formatter_check PRIVATE include third_part
 add_test(NAME sql_formatter_check COMMAND pawndb_sql_formatter_check)
 
 add_executable(pawndb_mariadb_session_check tests/mariadb_session_check.cpp)
+target_include_directories(pawndb_mariadb_session_check PRIVATE
+  third_party/omp-pawn-compiler/source third_party/omp-pawn-compiler/source/linux)
+target_compile_definitions(pawndb_mariadb_session_check PRIVATE HAVE_STDINT_H=1 PAWN_CELL_SIZE=32 PAWNDB_OMP=1)
 target_link_libraries(pawndb_mariadb_session_check PRIVATE pawndb_dependencies)
 add_test(NAME mariadb_session_check COMMAND pawndb_mariadb_session_check)
 
 add_executable(pawndb_postgres_session_check tests/postgres_session_check.cpp)
+target_include_directories(pawndb_postgres_session_check PRIVATE
+  third_party/omp-pawn-compiler/source third_party/omp-pawn-compiler/source/linux)
+target_compile_definitions(pawndb_postgres_session_check PRIVATE HAVE_STDINT_H=1 PAWN_CELL_SIZE=32 PAWNDB_OMP=1)
 target_link_libraries(pawndb_postgres_session_check PRIVATE pawndb_dependencies)
 add_test(NAME postgres_session_check COMMAND pawndb_postgres_session_check)
 

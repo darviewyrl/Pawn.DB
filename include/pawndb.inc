@@ -111,6 +111,16 @@ native pdb_get_int_by_index(PDBResult:result, field_index);
 native Float:pdb_get_float_by_index(PDBResult:result, field_index);
 native bool:pdb_get_str_by_index(PDBResult:result, field_index, output[], max_len = sizeof(output));
 native bool:pdb_get_bool_by_index(PDBResult:result, field_index);
+native pdb_json_get_int(PDBResult:res, const field_name[], const json_path[]);
+native Float:pdb_json_get_float(PDBResult:res, const field_name[], const json_path[]);
+native bool:pdb_json_get_bool(PDBResult:res, const field_name[], const json_path[]);
+native bool:pdb_json_get_str(PDBResult:res, const field_name[], const json_path[], output[], max_len = sizeof(output));
+native bool:pdb_json_get_vector(PDBResult:res, const field_name[], const json_path[], &Float:x, &Float:y, &Float:z);
+native bool:pdb_json_get_vector4(PDBResult:res, const field_name[], const json_path[], &Float:x, &Float:y, &Float:z, &Float:w);
+native bool:pdb_get_vector(PDBResult:res, const field_name[], &Float:x, &Float:y, &Float:z);
+native bool:pdb_get_vector_by_index(PDBResult:res, field_index, &Float:x, &Float:y, &Float:z);
+native bool:pdb_get_vector4(PDBResult:res, const field_name[], &Float:x, &Float:y, &Float:z, &Float:w);
+native bool:pdb_get_vector4_by_index(PDBResult:res, field_index, &Float:x, &Float:y, &Float:z, &Float:w);
 
 stock pdb_get_num_rows(PDBResult:res, &destination) {
     destination = pdb_num_rows(res);
@@ -134,6 +144,21 @@ stock bool:pdb_fetch_float(PDBResult:res, const field_name[], &Float:destination
 
 stock bool:pdb_fetch_bool(PDBResult:res, const field_name[], &bool:destination) {
     destination = pdb_get_bool(res, field_name);
+    return !pdb_is_null(res, field_name);
+}
+
+stock bool:pdb_json_fetch_int(PDBResult:res, const field_name[], const json_path[], &destination) {
+    destination = pdb_json_get_int(res, field_name, json_path);
+    return !pdb_is_null(res, field_name);
+}
+
+stock bool:pdb_json_fetch_float(PDBResult:res, const field_name[], const json_path[], &Float:destination) {
+    destination = pdb_json_get_float(res, field_name, json_path);
+    return !pdb_is_null(res, field_name);
+}
+
+stock bool:pdb_json_fetch_bool(PDBResult:res, const field_name[], const json_path[], &bool:destination) {
+    destination = pdb_json_get_bool(res, field_name, json_path);
     return !pdb_is_null(res, field_name);
 }
 
