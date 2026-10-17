@@ -135,17 +135,27 @@ class ConnectionNatives {
   static cell AMX_NATIVE_CALL json_free(AMX* amx, NativeParams params) { return json_lifecycle<false>(amx, params); }
   static cell AMX_NATIVE_CALL json_retain(AMX* amx, NativeParams params) { return json_lifecycle<true>(amx, params); }
 
-  static bool json_buffer(AMX* amx, cell address, std::size_t cells) {
+  static bool amx_buffer(AMX* amx, cell address, std::size_t cells) {
     if (!amx || address < 0 || address % sizeof(cell) || !cells) return false;
     const auto end = static_cast<std::uint64_t>(address) + cells * sizeof(cell);
     return end <= static_cast<std::uint64_t>(std::max(cell{0}, amx->hea)) ||
            (address >= amx->stk && end <= static_cast<std::uint64_t>(std::max(cell{0}, amx->stp)));
   }
 
-  bool json_string(AMX* amx, cell address, std::string& output) const {
-    if (!json_buffer(amx, address, 1)) return false;
-    const auto* data = amx->data ? amx->data : amx->base
+  static const unsigned char* amx_data(AMX* amx) {
+    return amx->data ? amx->data : amx->base
         ? amx->base + reinterpret_cast<const AMX_HEADER*>(amx->base)->dat : nullptr;
+  }
+
+  static bool read_cell(AMX* amx, cell address, cell& value) {
+    if (!amx_buffer(amx, address, 1) || !amx_data(amx)) return false;
+    std::memcpy(&value, amx_data(amx) + address, sizeof(value));
+    return true;
+  }
+
+  static bool string_address(AMX* amx, cell address) {
+    if (!amx_buffer(amx, address, 1)) return false;
+    const auto* data = amx_data(amx);
     if (!data) return false;
     const auto limit = address < amx->hea ? amx->hea : amx->stp;
     cell value = 0;
@@ -155,9 +165,13 @@ class ConnectionNatives {
       std::memcpy(&value, data + pos, sizeof(value));
       if (!value || (packed && (!(value & 0xff) || !(value & 0xff00) ||
                                 !(value & 0xff0000) || !(static_cast<ucell>(value) & 0xff000000))))
-        return read_ && read_(amx, address, output);
+        return true;
     }
     return false;
+  }
+
+  bool json_string(AMX* amx, cell address, std::string& output) const {
+    return string_address(amx, address) && read_ && read_(amx, address, output);
   }
 
   template <char Kind, int Count>
@@ -200,7 +214,7 @@ class ConnectionNatives {
       if (!current_ || !amx || argc(params) != 3 || !current_->write_) return json_warning();
       if (params[3] <= 0) return json_warning();
       const auto capacity = static_cast<std::size_t>(params[3]);
-      if (!json_buffer(amx, params[2], capacity)) return json_warning();
+      if (!amx_buffer(amx, params[2], capacity)) return json_warning();
       if (!current_->write_(amx, params[2], "", capacity)) return json_warning();
       auto object = current_->manager_.json(amx, static_cast<std::uint32_t>(params[1]));
       if (!object) return false;
@@ -292,14 +306,30 @@ class ConnectionNatives {
         return failure;
       }
       const auto available = static_cast<std::size_t>(count - first_variadic + 1);
-      const auto* args = reinterpret_cast<const std::int32_t*>(params + first_variadic);
-      const auto snapshot = manager_.escape_snapshot(connection_handle);
+            const auto* args = reinterpret_cast<const std::int32_t*>(params + first_variadic);
+const auto snapshot = manager_.escape_snapshot(connection_handle);
       PawnStringScratch argument;
       auto result = format_sql(format.view(), std::span(args, available),
           [&](std::int32_t address) -> std::optional<std::string_view> {
             return argument.load(address, length, copy)
                        ? std::optional<std::string_view>(argument.view()) : std::nullopt;
-          }, snapshot.get());
+          }, snapshot.get(), [&](std::int32_t address) -> std::optional<std::string> {
+            cell first = 0;
+            if (!read_cell(amx, address, first) || !first) return std::nullopt;
+            if (static_cast<std::uint32_t>(first) & HandleRegistry::kAddressExcluded) {
+              auto object = manager_.json(amx, static_cast<std::uint32_t>(first));
+              if (!object) return std::nullopt;
+              try { return object->value.dump(); } catch (const nlohmann::json::exception&) { return std::nullopt; }
+            }
+            if (!string_address(amx, address) || !argument.load(address, length, copy)) return std::nullopt;
+            return nlohmann::json::accept(argument.view())
+                ? std::optional<std::string>(argument.view()) : std::nullopt;
+          }, [amx](std::int32_t address) -> std::optional<std::int32_t> {
+            cell value = 0;
+            return read_cell(amx, address, value) ? std::optional<std::int32_t>(value) : std::nullopt;
+          });
+      if (result.invalid_json)
+        manager_.report_format_error("[Pawn.DB Warning] Invalid JSON payload replaced with SQL NULL.");
       if (result.error == SqlFormatError::stack_underflow) {
         manager_.report_format_error("[Pawn.DB Error] Stack parameter underflow in format string: expected " +
             std::to_string(result.expected) + " cells, got " + std::to_string(result.available) + " cells.");
@@ -334,8 +364,11 @@ class ConnectionNatives {
         callback_args.reserve(specifiers.size());
         for (std::size_t i = 0; i < specifiers.size(); ++i) {
           const cell value = params[first_variadic + static_cast<int>(i)];
-          if (specifiers[i] == 'd' || specifiers[i] == 'i' || specifiers[i] == 'f')
-            callback_args.emplace_back(value);
+          if (specifiers[i] == 'd' || specifiers[i] == 'i' || specifiers[i] == 'f') {
+            cell scalar = 0;
+            if (!read_cell(amx, value, scalar)) return false;
+            callback_args.emplace_back(scalar);
+          }
           else if (specifiers[i] == 's') {
             std::string text;
             if (!read_(amx, value, text)) return false;
@@ -571,8 +604,11 @@ class ConnectionNatives {
       callback_args.reserve(specifiers.size());
       for (std::size_t i = 0; i < specifiers.size(); ++i) {
         const cell value = params[first_variadic + static_cast<int>(i)];
-        if (specifiers[i] == 'd' || specifiers[i] == 'i' || specifiers[i] == 'f')
-          callback_args.emplace_back(value);
+        if (specifiers[i] == 'd' || specifiers[i] == 'i' || specifiers[i] == 'f') {
+          cell scalar = 0;
+          if (!read_cell(amx, value, scalar)) return 0;
+          callback_args.emplace_back(scalar);
+        }
         else if (specifiers[i] == 's') {
           std::string text;
           if (!read(amx, value, text)) return 0;

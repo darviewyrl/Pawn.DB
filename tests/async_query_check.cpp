@@ -15,6 +15,11 @@ int main() {
   pawndb::Lifecycle life;
   life.start();
   AMX amx{};
+  cell scalar = 42;
+  amx.data = reinterpret_cast<unsigned char*>(&scalar);
+  amx.hea = sizeof(cell);
+  amx.stk = sizeof(cell);
+  amx.stp = sizeof(cell);
   life.attach(&amx);
   std::mutex mutex;
   std::condition_variable ready;
@@ -120,7 +125,7 @@ int main() {
     if (!ready.wait_for(lock, 2s, [&] { return entered; })) { std::cerr << "slow not entered\n"; return 1; }
   }
   const cell normal[] = {2 * sizeof(cell), static_cast<cell>(handle), 16};
-  const cell high[] = {5 * sizeof(cell), static_cast<cell>(handle), 17, 11, 12, 42};
+  const cell high[] = {5 * sizeof(cell), static_cast<cell>(handle), 17, 11, 12, 0};
   const auto enqueue_start = std::chrono::steady_clock::now();
   if (!native("pdb_execute")(&amx, normal) || !native("pdb_query")(&amx, high) ||
       std::chrono::steady_clock::now() - enqueue_start > 50ms || !callbacks.empty()) { std::cerr << "priority enqueue\n"; return 1; }

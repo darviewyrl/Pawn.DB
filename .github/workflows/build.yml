@@ -28,6 +28,9 @@ jobs:
           ./shutdown_tsan
           g++ -std=c++20 -pthread -fsanitize=thread -fPIE -pie -g -Iinclude -Ithird_party/json/include -Ithird_party/omp-pawn-compiler/source -Ithird_party/omp-pawn-compiler/source/linux -DHAVE_STDINT_H=1 -DPAWN_CELL_SIZE=32 -DPAWNDB_OMP=1 tests/json_builder_check.cpp -o json_builder_tsan
           ./json_builder_tsan
+          gcc -std=c99 -fsanitize=thread -fPIE -g -DAMX_NODYNALOAD=1 -DHAVE_STDINT_H=1 -DPAWN_CELL_SIZE=32 -Ithird_party/omp-pawn-compiler/source/linux -c third_party/omp-pawn-compiler/source/amx/amx.c -o amx_format_tsan.o
+          g++ -std=c++20 -pthread -fsanitize=thread -fPIE -pie -g -Iinclude -Ithird_party/json/include -Ithird_party/omp-pawn-compiler/source -Ithird_party/omp-pawn-compiler/source/linux -DHAVE_STDINT_H=1 -DPAWN_CELL_SIZE=32 -DPAWNDB_OMP=1 tests/json_spatial_format_check.cpp amx_format_tsan.o -o json_spatial_format_tsan
+          ./json_spatial_format_tsan
       - name: Check Argon2id native pipeline with TSan
         run: |
           sudo apt-get update
@@ -55,6 +58,9 @@ jobs:
           ./shutdown_asan
           g++ -std=c++20 -pthread -fsanitize=address -fno-omit-frame-pointer -g -Iinclude -Ithird_party/json/include -Ithird_party/omp-pawn-compiler/source -Ithird_party/omp-pawn-compiler/source/linux -DHAVE_STDINT_H=1 -DPAWN_CELL_SIZE=32 -DPAWNDB_OMP=1 tests/json_builder_check.cpp -o json_builder_asan
           ASAN_OPTIONS=detect_leaks=1 ./json_builder_asan
+          gcc -std=c99 -fsanitize=address -fno-omit-frame-pointer -g -DAMX_NODYNALOAD=1 -DHAVE_STDINT_H=1 -DPAWN_CELL_SIZE=32 -Ithird_party/omp-pawn-compiler/source/linux -c third_party/omp-pawn-compiler/source/amx/amx.c -o amx_format_asan.o
+          g++ -std=c++20 -pthread -fsanitize=address -fno-omit-frame-pointer -g -Iinclude -Ithird_party/json/include -Ithird_party/omp-pawn-compiler/source -Ithird_party/omp-pawn-compiler/source/linux -DHAVE_STDINT_H=1 -DPAWN_CELL_SIZE=32 -DPAWNDB_OMP=1 tests/json_spatial_format_check.cpp amx_format_asan.o -o json_spatial_format_asan
+          ASAN_OPTIONS=detect_leaks=1 ./json_spatial_format_asan
       - name: Check Argon2id native pipeline with ASan and leak detection
         run: |
           sudo apt-get update
@@ -160,3 +166,8 @@ jobs:
           & cl @common /Ithird_party/json/include /Ithird_party/omp-pawn-compiler/source /Ithird_party/omp-pawn-compiler/source/linux /DHAVE_STDINT_H=1 /DPAWN_CELL_SIZE=32 /DPAWNDB_OMP=1 tests/json_builder_check.cpp /Fe:json_builder_asan.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\json_builder_asan.exe
+          & cl /nologo /TC /c /fsanitize=address /MD /DAMX_NODYNALOAD=1 /DHAVE_STDINT_H=1 /DPAWN_CELL_SIZE=32 /D_CRT_SECURE_NO_WARNINGS /Ithird_party/omp-pawn-compiler/source/linux third_party/omp-pawn-compiler/source/amx/amx.c /Fo:amx_format_asan.obj
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & cl @common /Ithird_party/json/include /Ithird_party/omp-pawn-compiler/source /Ithird_party/omp-pawn-compiler/source/linux /DHAVE_STDINT_H=1 /DPAWN_CELL_SIZE=32 /DPAWNDB_OMP=1 tests/json_spatial_format_check.cpp amx_format_asan.obj /Fe:json_spatial_format_asan.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\json_spatial_format_asan.exe

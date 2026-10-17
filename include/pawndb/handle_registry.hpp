@@ -14,11 +14,12 @@ class HandleRegistry {
  public:
   using Handle = std::uint32_t;
   using Warning = std::function<void(Handle)>;
+  static constexpr Handle kAddressExcluded = 0x80000000u;
 
   explicit HandleRegistry(Warning warning = {}) : warning_(std::move(warning)) {}
 
   template <class T>
-  Handle insert(std::shared_ptr<T> value) {
+  Handle insert(std::shared_ptr<T> value, bool exclude_addresses = false) {
     if (!value) return 0;
     std::lock_guard lock(mutex_);
     std::uint32_t index;
@@ -31,6 +32,9 @@ class HandleRegistry {
       free_.pop_back();
     }
     auto& slot = slots_[index];
+    // Negative Pawn cells cannot be AMX data offsets; never lower a generation on reuse.
+    if (exclude_addresses && slot.generation < (kAddressExcluded >> kIndexBits))
+      slot.generation = kAddressExcluded >> kIndexBits;
     slot.value = std::move(value);
     slot.type = typeid(T);
     return (slot.generation << kIndexBits) | (index + 1);

@@ -11,6 +11,11 @@ int main() {
   pawndb::Lifecycle life;
   life.start();
   AMX amx{};
+  cell scalar = 7;
+  amx.data = reinterpret_cast<unsigned char*>(&scalar);
+  amx.hea = sizeof(cell);
+  amx.stk = sizeof(cell);
+  amx.stp = sizeof(cell);
   if (!life.attach(&amx)) return 1;
   struct Pool final : pawndb::SessionPool {
     bool query(std::string_view, pawndb::DriverError&) override { return true; }
@@ -100,7 +105,7 @@ int main() {
   if (!manager.is_connected(connection)) return 2;
 
   const auto batch = call("pdb_batch_create", {static_cast<cell>(connection), 0});
-  if (batch <= 0 || !call("pdb_batch_add", {batch, 100, 7}) ||
+  if (batch <= 0 || !call("pdb_batch_add", {batch, 100, 0}) ||
       !call("pdb_batch_add", {batch, 101}) || !call("pdb_batch_add", {batch, 102})) return 3;
   if (!call("pdb_batch_execute", {batch, 200, 201})) return 4;
   const auto deadline = std::chrono::steady_clock::now() + 3s;

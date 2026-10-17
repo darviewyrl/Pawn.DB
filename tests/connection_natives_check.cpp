@@ -8,6 +8,11 @@ int main() {
   pawndb::Lifecycle life;
   life.start();
   AMX amx{};
+  cell scalar = 42;
+  amx.data = reinterpret_cast<unsigned char*>(&scalar);
+  amx.hea = sizeof(cell);
+  amx.stk = sizeof(cell);
+  amx.stp = sizeof(cell);
   life.attach(&amx);
   pawndb::ConnectionManager manager(life, [](void*, auto, int, std::string) {},
                                     [](std::string) {});
@@ -78,7 +83,7 @@ int main() {
   const cell connect[] = {6 * sizeof(cell), 1, 2, 3, 4, 3307, setup};
   const cell handle = native("pdb_connect")(&amx, connect);
   if (!handle) return 1;
-  const cell variadic[] = {6 * sizeof(cell), handle, 0, 0, 10, 42, 11};
+  const cell variadic[] = {6 * sizeof(cell), handle, 0, 0, 10, 0, 11};
   auto formatted = natives.format_variadic(&amx, variadic);
   if (!formatted || formatted.sql.view() != "SELECT 42, hello" || argument_reads != 2) return 1;
   argument_reads = 0;

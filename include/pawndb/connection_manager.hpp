@@ -593,7 +593,7 @@ class ConnectionManager {
     if (!amx || life_.context(amx).expired()) return 0;
     Handle handle = 0;
     try {
-      handle = handles_.insert(std::make_shared<JsonObject>(JsonObject{amx, nlohmann::json::object(), retained}));
+      handle = handles_.insert(std::make_shared<JsonObject>(JsonObject{amx, nlohmann::json::object(), retained}), true);
       if (!handle) return 0;
       owners_[amx].insert(handle);
       if (!retained) {

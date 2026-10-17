@@ -154,9 +154,9 @@ stock bool:pdb_fetch_bool_by_index(PDBResult:res, field_index, &bool:destination
 
 native pdb_format(PDB:handle, output[], max_len = sizeof(output), const format[],
                   {Float, PDBJson, _}:...);
-native pdb_execute(PDB:handle, const format[], {Float, _}:...);
+native pdb_execute(PDB:handle, const format[], {Float, PDBJson, _}:...);
 native pdb_query(PDB:handle, const format[], const callback[], const specifiers[] = "",
-                 {Float, _}:...);
+                 {Float, PDBJson, _}:...);
 
 forward OnQueryError(PDB:handle, error_id, const error_msg[], const query[]);
 forward OnBatchComplete(PDB:handle, PDBBatchResult:result);
