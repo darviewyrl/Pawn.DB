@@ -6,7 +6,7 @@
 Pawn.DB is a C++20 asynchronous database plugin for Pawn servers. It supports MariaDB/MySQL and PostgreSQL and provides separate adapters for open.mp and legacy SA-MP.
 
 - Documentation site source: [Mintlify docs repository](https://github.com/darviewyrl/pawndb.docs)
-- Migration guide: [MIGRATION_GUIDE.md](https://github.com/darviewyrl/pawndb.docs/blob/main/MIGRATION_GUIDE.md)
+- Migration guide: [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md)
 - Releases: [GitHub Releases](https://github.com/darviewyrl/Pawn.DB/releases)
 
 > The Mintlify project has no verified public site URL in the repository yet. Use the docs repository link until its deployment domain is confirmed.
@@ -24,6 +24,7 @@ Pawn.DB is a C++20 asynchronous database plugin for Pawn servers. It supports Ma
 Install a matching server binary and `include/pawndb.inc`; create `configs/database.json` and then:
 
 ```pawn
+#include <a_samp>
 #include <pawndb>
 
 new PDB:gDatabase;
@@ -36,8 +37,10 @@ public OnGameModeInit()
 
 public OnPlayerConnect(playerid)
 {
-    pdb_query(gDatabase, "SELECT score FROM players WHERE id = %d",
-        "OnPlayerLoaded", "i", playerid);
+    new query[128];
+    if (!pdb_format(gDatabase, query, sizeof(query),
+        "SELECT score FROM players WHERE id = %d", playerid)) return 0;
+    pdb_query(gDatabase, query, "OnPlayerLoaded", "i", playerid);
     return 1;
 }
 
@@ -83,4 +86,4 @@ Select `x86` for 32-bit; use `-Adapter samp` only with x86. Linux x86 builds req
 
 ## Compatibility
 
-Selected pBlueG R41-4 and omp-mysql APIs can be enabled with `#define PAWNDB_COMPAT` before `<pawndb>`. This is a source migration aid, not a full behavioral replacement. Deprecated synchronous, ORM, and legacy bcrypt APIs compile as warnings and return fallback values without doing work. Review the [migration guide](https://github.com/darviewyrl/pawndb.docs/blob/main/MIGRATION_GUIDE.md).
+Selected pBlueG R41-4 and omp-mysql APIs can be enabled with `#define PAWNDB_COMPAT` before `<pawndb>`. This is a source migration aid, not a full behavioral replacement. Deprecated synchronous, ORM, and legacy bcrypt APIs compile as warnings and return fallback values without doing work. Review the [migration guide](MIGRATION_GUIDE.md).

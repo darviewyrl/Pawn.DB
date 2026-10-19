@@ -1,4 +1,10 @@
 file(MAKE_DIRECTORY "${OUTPUT}")
+file(WRITE "${OUTPUT}/callbacks.pwn" "#include <pawndb>\nmain() {}\npublic OnConnectionError(PDB:handle, error_id, const error_msg[]) { return _:handle + error_id + error_msg[0]; }\npublic OnQueryError(PDB:handle, error_id, const error_msg[], const query[]) { return _:handle + error_id + error_msg[0] + query[0]; }\npublic OnBatchComplete(PDB:connection, PDBBatchResult:batch_result) { return _:connection + _:batch_result; }\npublic OnPasswordHashed(const hash[]) { return hash[0]; }\npublic OnPasswordVerified(bool:success) { return _:success; }\n")
+execute_process(COMMAND "${COMPILER}" "${OUTPUT}/callbacks.pwn" "-i${ROOT}/include" "-o${OUTPUT}/callbacks.amx"
+  RESULT_VARIABLE status OUTPUT_VARIABLE out ERROR_VARIABLE err)
+if(NOT status EQUAL 0 OR "${out}${err}" MATCHES "warning 235")
+  message(FATAL_ERROR "Built-in callback declarations failed: ${out}${err}")
+endif()
 foreach(pair IN ITEMS "a_mysql|mysql_included" "omp_mysql|_INC_mysql" "omp-mysql|_INC_mysql")
   string(REPLACE "|" ";" parts "${pair}")
   list(GET parts 0 header)

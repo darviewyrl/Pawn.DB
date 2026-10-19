@@ -192,8 +192,11 @@ native pdb_execute(PDB:handle, const format[], {Float, PDBJson, _}:...);
 native pdb_query(PDB:handle, const format[], const callback[] = "", const specifiers[] = "",
                  {Float, PDBJson, _}:...);
 
+forward OnConnectionError(PDB:handle, error_id, const error_msg[]);
 forward OnQueryError(PDB:handle, error_id, const error_msg[], const query[]);
-forward OnBatchComplete(PDB:handle, PDBBatchResult:result);
+forward OnBatchComplete(PDB:connection, PDBBatchResult:batch_result);
+forward OnPasswordHashed(const hash[]);
+forward OnPasswordVerified(bool:success);
 
 #if defined PAWNDB_COMPAT
     #if defined mysql_included || defined _INC_mysql
