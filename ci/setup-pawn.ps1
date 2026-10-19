@@ -4,7 +4,7 @@ $legacy = 'build/tools/legacy-samp'
 if (-not (Test-Path "$legacy/pawncc.exe")) {
   $zip = 'build/tools/samp037_svr_R2-1-1_win32.zip'
   New-Item -ItemType Directory -Force build/tools | Out-Null
-  Invoke-WebRequest 'https://files.sampmobile.com/samp037_svr_R2-1-1_win32.zip' -OutFile $zip
+  Invoke-WebRequest 'https://raw.githubusercontent.com/ksenonadv/sa-mp-files/ebdc9a94467a51fce69fdd285cf26af9b858b457/archives/samp037_svr_R2-1-1_win32.zip' -OutFile $zip
   if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne 'E12E7483D4DF0349F52E2C5F47D6AFD3F782ACBC2BBB19FA61ADCED3BFFF2D90') {
     throw 'SA-MP compiler archive hash mismatch'
   }
