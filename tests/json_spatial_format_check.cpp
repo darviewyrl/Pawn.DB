@@ -49,7 +49,9 @@ cell AMX_NATIVE_CALL fixture_result(AMX* amx, pawndb::NativeParams) {
   result.fields = {"doc", "vec", "vec4"};
   result.rows = {{R"({"inventory":{"slots":[{"attributes":{"durability":1}},{"attributes":{"durability":2}},{"attributes":{"durability":12}}]},"truth":true,"ratio":1.25,"name":"pawn","id":18446744073709551615,"position":[1,2,3],"transform":[4,5,6,7]})",
                   "1532.125,-1688.5432,13.5", "1532.125,-1688.5432,13.5,270"}};
-  return static_cast<cell>(fixture_manager->create_result(amx, std::move(result)));
+  const auto handle = fixture_manager->create_result(amx, std::move(result));
+  fixture_manager->activate_result(amx, handle);
+  return static_cast<cell>(handle);
 }
 cell AMX_NATIVE_CALL probe(AMX* amx, pawndb::NativeParams p) {
   static int call = 0;
@@ -179,9 +181,9 @@ int main(int argc, char** argv) {
   persisted.fields = {"position"};
   persisted.rows = {{std::string(spatial_sql.sql.view().substr(1, spatial_sql.sql.view().size() - 2))}};
   const auto persisted_handle = manager.create_result(&amx, std::move(persisted));
-  CHECK(persisted_handle && call("pdb_next_row", {static_cast<cell>(persisted_handle)}));
+  CHECK(persisted_handle && call("pdb_activate_result", {static_cast<cell>(persisted_handle)}));
   constexpr cell rx = 2800 * sizeof(cell), ry = 2801 * sizeof(cell), rz = 2802 * sizeof(cell), rw = 2803 * sizeof(cell);
-  CHECK(call("pdb_get_vector4_by_index", {static_cast<cell>(persisted_handle), 0, rx, ry, rz, rw}));
+  CHECK(call("pdb_get_vector4_by_index", {0, rx, ry, rz, rw, -1}));
   auto roundtrip = [&](cell address) { return std::bit_cast<float>(memory[static_cast<std::size_t>(address / sizeof(cell))]); };
   CHECK(std::abs(roundtrip(rx) - 1500.5f) < 1e-4f && std::abs(roundtrip(ry) + 1200.25f) < 1e-4f &&
         std::abs(roundtrip(rz) - 15.125f) < 1e-4f && std::abs(roundtrip(rw) - 90.0f) < 1e-4f);

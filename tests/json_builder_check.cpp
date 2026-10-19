@@ -55,7 +55,7 @@ int main() {
     CHECK(std::string_view(item->name).starts_with("pdb_"));
     ++count;
   }
-  CHECK(count == natives.native_count && count == 74);
+  CHECK(count == natives.native_count && count == 75);
   const auto handle = call("pdb_json_create", {0});
   CHECK(handle && !call("pdb_json_create", {}));
   CHECK(call("pdb_json_to_string", {handle, output, 64}));

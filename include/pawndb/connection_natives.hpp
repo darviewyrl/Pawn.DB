@@ -74,7 +74,8 @@ class ConnectionNatives {
         {"pdb_get_stat", get_stat}, {"pdb_get_metrics", get_metrics},
         {"pdb_set_slow_query_threshold", set_slow_query_threshold},
         {"pdb_format", format}, {"pdb_execute", execute}, {"pdb_query", query},
-        {"pdb_retain_result", retain_result}, {"pdb_free_result", free_result},
+        {"pdb_retain_result", retain_result}, {"pdb_activate_result", activate_result},
+        {"pdb_free_result", free_result},
         {"pdb_num_rows", num_rows}, {"pdb_num_fields", num_fields},
         {"pdb_next_row", next_row}, {"pdb_has_next_result", has_next_result},
         {"pdb_next_result", next_result}, {"pdb_insert_id", insert_id},
@@ -108,7 +109,7 @@ class ConnectionNatives {
     return natives;
   }
 
-  static constexpr int native_count = 74;
+  static constexpr int native_count = 75;
 
   SqlFormatResult format_variadic(AMX* amx, NativeParams params) const {
     return format_at(amx, params, 1, 4, 5);
@@ -363,7 +364,7 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
     std::vector<CallbackArg> callback_args;
     if (query_request) {
       try {
-        if (!read_(amx, params[3], callback_name) || callback_name.empty() ||
+        if (!read_(amx, params[3], callback_name) ||
             !read_(amx, params[4], specifiers)) return false;
         const auto available = static_cast<std::size_t>(count - first_variadic + 1);
         if (specifiers.size() > available) return false;
@@ -396,18 +397,16 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
       if (ok && !callback_name.empty()) {
         const auto result_handle = manager->create_result(amx, std::move(result));
         if (!result_handle) {
+          ConnectionManager::ResultScope scope(*manager, amx, 0);
           invoke(amx, "OnQueryError", {static_cast<cell>(handle), cell{-4},
                                         std::string("unable to allocate query result"),
                                         std::string("<redacted>")});
           return;
         }
-        try {
-          auto args = callback_args;
-          args.insert(args.begin(), static_cast<cell>(result_handle));
-          invoke(amx, callback_name, args);
-        } catch (...) {}
-        manager->release_scoped_result(amx, result_handle);
+        ConnectionManager::ResultScope scope(*manager, amx, result_handle);
+        try { invoke(amx, callback_name, callback_args); } catch (...) {}
       } else if (!ok) {
+        ConnectionManager::ResultScope scope(*manager, amx, 0);
         invoke(amx, "OnQueryError", {static_cast<cell>(handle), static_cast<cell>(error.code),
                                       std::move(error.message), std::string("<redacted>")});
       }
@@ -628,6 +627,12 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
                          callback_args = std::move(callback_args)](BatchExecutionResult data) {
         const auto result_handle = manager->create_batch_result(amx, std::move(data));
         if (!result_handle) return;
+        const auto batch_result = manager->batch_result(amx, result_handle);
+        const auto first = std::find_if(batch_result->items.begin(), batch_result->items.end(),
+            [](const auto& item) { return item.result_handle != 0; });
+        // A retained batch owns its children until batch cleanup.
+        ConnectionManager::ResultScope scope(*manager, amx,
+            first == batch_result->items.end() ? 0 : first->result_handle, false);
         if (invoke) {
           try {
             auto args = callback_args;
@@ -690,7 +695,13 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
   }
 
   static cell AMX_NATIVE_CALL retain_result(AMX* amx, NativeParams params) {
-    return current_ && argc(params) == 1 && current_->manager_.retain_result(
+    if (!current_ || argc(params) != 0) return 0;
+    const auto handle = current_->manager_.active_result(amx);
+    return current_->manager_.retain_result(amx, handle) ? static_cast<cell>(handle) : 0;
+  }
+
+  static cell AMX_NATIVE_CALL activate_result(AMX* amx, NativeParams params) {
+    return current_ && argc(params) == 1 && current_->manager_.activate_result(
         amx, static_cast<std::uint32_t>(params[1]));
   }
 
@@ -699,10 +710,20 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
         amx, static_cast<std::uint32_t>(params[1]));
   }
 
-  static std::shared_ptr<ResultObject> get_result(AMX* amx, NativeParams params) {
-    return current_ && argc(params) >= 1
-               ? current_->manager_.result(amx, static_cast<std::uint32_t>(params[1]))
-               : nullptr;
+  static std::shared_ptr<ResultObject> get_result(AMX* amx) {
+    return current_ ? current_->manager_.result(amx, current_->manager_.active_result(amx)) : nullptr;
+  }
+
+  static std::shared_ptr<ResultObject> get_row_result(AMX* amx, cell row) {
+    auto result = get_result(amx);
+    if (!result) return {};
+    if (row < -1 || (row >= 0 && static_cast<std::size_t>(row) >= result->data.rows.size())) {
+      current_->manager_.report_format_error("[Pawn.DB Warning] Result row index out of range.");
+      return {};
+    }
+    if (row >= 0) result->cursor = row;
+    else if (result->cursor == -1 && !result->data.rows.empty()) result->cursor = 0;
+    return result;
   }
 
   static std::optional<std::size_t> column(ResultObject& result, cell index) {
@@ -766,8 +787,8 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
 
   static cell string(AMX* amx, NativeParams params, int field_index, int output_index,
                      int capacity_index, bool by_name) {
-    if (!current_ || argc(params) != capacity_index || params[capacity_index] <= 0) return 0;
-    auto result = get_result(amx, params);
+    if (!current_ || argc(params) != capacity_index + 1 || params[capacity_index] <= 0) return 0;
+    auto result = get_row_result(amx, params[capacity_index + 1]);
     std::optional<std::size_t> index;
     if (result) {
       if (by_name) {
@@ -784,22 +805,22 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
   }
 
   static cell num_rows(AMX* amx, NativeParams params) {
-    if (argc(params) != 1) return 0;
-    const auto result = get_result(amx, params);
+    if (argc(params) != 0) return 0;
+    const auto result = get_result(amx);
     return result ? static_cast<cell>(std::min<std::size_t>(
                         result->data.rows.size(), std::numeric_limits<cell>::max())) : 0;
   }
 
   static cell num_fields(AMX* amx, NativeParams params) {
-    if (argc(params) != 1) return 0;
-    const auto result = get_result(amx, params);
+    if (argc(params) != 0) return 0;
+    const auto result = get_result(amx);
     return result ? static_cast<cell>(std::min<std::size_t>(
                         result->data.fields.size(), std::numeric_limits<cell>::max())) : 0;
   }
 
   static cell next_row(AMX* amx, NativeParams params) {
-    if (argc(params) != 1) return 0;
-    const auto result = get_result(amx, params);
+    if (argc(params) != 0) return 0;
+    const auto result = get_result(amx);
     if (!result || result->cursor + 1 >= static_cast<std::int64_t>(result->data.rows.size()))
       return 0;
     ++result->cursor;
@@ -807,20 +828,20 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
   }
 
   static cell has_next_result(AMX* amx, NativeParams params) {
-    if (argc(params) != 1) return 0;
-    const auto result = get_result(amx, params);
+    if (argc(params) != 0) return 0;
+    const auto result = get_result(amx);
     return result && result->has_next_result();
   }
 
   static cell next_result(AMX* amx, NativeParams params) {
-    if (argc(params) != 1) return 0;
-    const auto result = get_result(amx, params);
+    if (argc(params) != 0) return 0;
+    const auto result = get_result(amx);
     return result && result->next_result();
   }
 
   static cell result_metadata(AMX* amx, NativeParams params, int field) {
-    if (argc(params) != 1) return 0;
-    const auto result = get_result(amx, params);
+    if (argc(params) != 0) return 0;
+    const auto result = get_result(amx);
     if (!result) return 0;
     const auto& meta = result->data.metadata;
     const auto value = field == 0 ? meta.insert_id : field == 1 ? meta.affected_rows :
@@ -835,25 +856,25 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
   static cell warning_count(AMX* amx, NativeParams params) { return result_metadata(amx, params, 3); }
 
   static cell seek_row(AMX* amx, NativeParams params) {
-    if (argc(params) != 2 || params[2] < 0) return 0;
-    const auto result = get_result(amx, params);
-    if (!result || static_cast<std::size_t>(params[2]) >= result->data.rows.size()) return 0;
-    result->cursor = params[2];
+    if (argc(params) != 1 || params[1] < 0) return 0;
+    const auto result = get_result(amx);
+    if (!result || static_cast<std::size_t>(params[1]) >= result->data.rows.size()) return 0;
+    result->cursor = params[1];
     return 1;
   }
 
   static cell field_name(AMX* amx, NativeParams params) {
-    if (!current_ || argc(params) != 4 || params[2] < 0 || params[4] <= 0) return 0;
-    const auto result = get_result(amx, params);
-    const auto index = result ? column(*result, params[2]) : std::nullopt;
-    const bool written = write_string(amx, params[3],
+    if (!current_ || argc(params) != 3 || params[1] < 0 || params[3] <= 0) return 0;
+    const auto result = get_result(amx);
+    const auto index = result ? column(*result, params[1]) : std::nullopt;
+    const bool written = write_string(amx, params[2],
         index ? std::string_view(result->data.fields[*index]) : std::string_view{},
-        static_cast<std::size_t>(params[4]));
+        static_cast<std::size_t>(params[3]));
     return index.has_value() && written;
   }
 
   static cell is_null_at(AMX* amx, NativeParams params, int field_index, bool by_name) {
-    auto result = get_result(amx, params);
+    auto result = get_row_result(amx, params[2]);
     if (!result) return 0;
     std::optional<std::size_t> index;
     if (by_name) {
@@ -866,23 +887,23 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
   }
 
   static cell is_null(AMX* amx, NativeParams params) {
-    return current_ && argc(params) == 2 ? is_null_at(amx, params, 2, true) : 0;
+    return current_ && argc(params) == 2 ? is_null_at(amx, params, 1, true) : 0;
   }
 
   static cell is_null_by_index(AMX* amx, NativeParams params) {
-    return current_ && argc(params) == 2 ? is_null_at(amx, params, 2, false) : 0;
+    return current_ && argc(params) == 2 ? is_null_at(amx, params, 1, false) : 0;
   }
 
   static cell get_number(AMX* amx, NativeParams params, bool by_name, bool floating,
                          bool boolean_value) {
     if (!current_ || argc(params) != 2) return 0;
-    const auto result = get_result(amx, params);
+    const auto result = get_row_result(amx, params[2]);
     if (!result) return 0;
     std::optional<std::size_t> index;
     if (by_name) {
       std::string name;
-      if (read_field_name(amx, params[2], name)) index = column(*result, name);
-    } else index = column(*result, params[2]);
+      if (read_field_name(amx, params[1], name)) index = column(*result, name);
+    } else index = column(*result, params[1]);
     const auto* field = index ? value(*result, *index) : nullptr;
     return boolean_value ? boolean(field) : floating ? real(field) : integer(field);
   }
@@ -906,10 +927,10 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
     return get_number(amx, params, false, false, true);
   }
   static cell get_str(AMX* amx, NativeParams params) {
-    return string(amx, params, 2, 3, 4, true);
+    return string(amx, params, 1, 2, 3, true);
   }
   static cell get_str_by_index(AMX* amx, NativeParams params) {
-    return string(amx, params, 2, 3, 4, false);
+    return string(amx, params, 1, 2, 3, false);
   }
 
   static void extraction_warning(std::string_view text) noexcept {
@@ -970,10 +991,10 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
 
   static std::optional<nlohmann::json> json_value_at(AMX* amx, NativeParams params) {
     if (!current_ || argc(params) < 3) return {};
-    const auto result = get_result(amx, params);
+    const auto result = get_row_result(amx, params[argc(params)]);
     if (!result) return {};
     std::string name, path;
-    if (!read_field_name(amx, params[2], name) || !read_field_name(amx, params[3], path)) return {};
+    if (!read_field_name(amx, params[1], name) || !read_field_name(amx, params[2], path)) return {};
     const auto index = column(*result, name);
     const auto* field = index ? value(*result, *index) : nullptr;
     if (!field || !*field) return {};
@@ -1026,19 +1047,19 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
 
   static cell AMX_NATIVE_CALL json_get_str(AMX* amx, NativeParams params) {
     try {
-    if (!current_ || argc(params) != 5 || params[5] <= 0 || !current_->write_) return 0;
+    if (!current_ || argc(params) != 5 || params[4] <= 0 || !current_->write_) return 0;
     const auto target = json_value_at(amx, params);
     std::string output;
     const bool valid = target && (target->is_string() || target->is_number_integer() ||
         target->is_number_unsigned() || target->is_object() || target->is_array());
     if (valid) output = target->is_string() ? target->get<std::string>() : target->dump();
-    if (!write_string(amx, params[4], valid ? std::string_view(output) : std::string_view{},
-                      static_cast<std::size_t>(params[5]))) return 0;
+    if (!write_string(amx, params[3], valid ? std::string_view(output) : std::string_view{},
+                      static_cast<std::size_t>(params[4]))) return 0;
     if (!target) extraction_warning("invalid result, JSON, or path");
-    return valid && output.size() < static_cast<std::size_t>(params[5]);
+    return valid && output.size() < static_cast<std::size_t>(params[4]);
     } catch (...) {
-      if (current_ && argc(params) == 5 && params[5] > 0)
-        write_string(amx, params[4], {}, static_cast<std::size_t>(params[5]));
+      if (current_ && argc(params) == 5 && params[4] > 0)
+        write_string(amx, params[3], {}, static_cast<std::size_t>(params[4]));
       extraction_warning("native could not serialize JSON value"); return 0;
     }
   }
@@ -1056,7 +1077,7 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
     try {
     if (!current_ || argc(params) != Count + 3) return false;
     std::array<bool, Count> accessible{};
-    for (int i = 0; i < Count; ++i) accessible[i] = amx_buffer(amx, params[4 + i], 1);
+    for (int i = 0; i < Count; ++i) accessible[i] = amx_buffer(amx, params[3 + i], 1);
     const auto target = json_value_at(amx, params);
     std::array<float, Count> output{};
     bool valid = target && target->is_array() && target->size() == Count;
@@ -1066,12 +1087,12 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
       output[i] = *number;
     }
     for (int i = 0; i < Count; ++i)
-      if (accessible[i]) write_amx_cell(amx, params[4 + i], std::bit_cast<cell>(valid ? output[i] : 0.0f));
+      if (accessible[i]) write_amx_cell(amx, params[3 + i], std::bit_cast<cell>(valid ? output[i] : 0.0f));
     if (!valid) extraction_warning("invalid JSON vector or component");
     return valid && std::all_of(accessible.begin(), accessible.end(), [](bool item) { return item; });
     } catch (...) {
       for (int i = 0; i < Count; ++i)
-        if (amx_buffer(amx, params[4 + i], 1)) write_amx_cell(amx, params[4 + i], 0);
+        if (amx_buffer(amx, params[3 + i], 1)) write_amx_cell(amx, params[3 + i], 0);
       extraction_warning("native could not convert JSON vector"); return 0;
     }
   }
@@ -1082,15 +1103,15 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
   static cell spatial_vector(AMX* amx, NativeParams params, bool by_name) {
     try {
     if (!current_ || argc(params) != Count + 2) return false;
-    constexpr int first_output = 3;
+    constexpr int first_output = 2;
     std::array<bool, Count> accessible{};
     for (int i = 0; i < Count; ++i) accessible[i] = amx_buffer(amx, params[first_output + i], 1);
-    auto result = get_result(amx, params);
+    auto result = get_row_result(amx, params[Count + 2]);
     std::optional<std::size_t> index;
     if (result && by_name) {
       std::string name;
-      if (read_field_name(amx, params[2], name)) index = column(*result, name);
-    } else if (result) index = column(*result, params[2]);
+      if (read_field_name(amx, params[1], name)) index = column(*result, name);
+    } else if (result) index = column(*result, params[1]);
     const auto* field = result && index ? value(*result, *index) : nullptr;
     std::array<float, Count> output{};
     bool valid = field && *field;
@@ -1114,7 +1135,7 @@ const auto snapshot = manager_.escape_snapshot(connection_handle);
     return valid && std::all_of(accessible.begin(), accessible.end(), [](bool item) { return item; });
     } catch (...) {
       for (int i = 0; i < Count; ++i)
-        if (amx_buffer(amx, params[3 + i], 1)) write_amx_cell(amx, params[3 + i], 0);
+        if (amx_buffer(amx, params[2 + i], 1)) write_amx_cell(amx, params[2 + i], 0);
       extraction_warning("native could not parse spatial value"); return 0;
     }
   }

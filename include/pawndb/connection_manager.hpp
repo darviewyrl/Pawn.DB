@@ -108,6 +108,29 @@ class ConnectionManager {
   using ErrorSink = std::function<void(void*, Handle, int, std::string)>;
   using WarningSink = std::function<void(std::string)>;
 
+  class ResultScope {
+   public:
+    ResultScope(ConnectionManager& manager, void* amx, Handle handle, bool scoped = true)
+        : manager_(manager), owner_(amx), handle_(handle), previous_(manager.active_result(amx)), scoped_(scoped) {
+      manager_.activate_result(amx, handle);
+    }
+    ResultScope(const ResultScope&) = delete;
+    ResultScope& operator=(const ResultScope&) = delete;
+    ~ResultScope() {
+      auto slot = manager_.active_results_.find(owner_);
+      if (slot != manager_.active_results_.end()) {
+        const auto result = manager_.handles_.get<ResultObject>(previous_, false);
+        slot->second = result && result->owner == owner_ ? previous_ : 0;
+      }
+      if (scoped_) manager_.release_scoped_result(owner_, handle_);
+    }
+   private:
+    ConnectionManager& manager_;
+    void* owner_;
+    Handle handle_, previous_;
+    bool scoped_;
+  };
+
   class JsonScope {
    public:
     JsonScope(ConnectionManager& manager, void* amx)
@@ -511,6 +534,7 @@ class ConnectionManager {
     if (life_.context(amx).expired()) return 0;
     Handle handle = 0;
     try {
+      active_results_.try_emplace(amx, 0);
       handle = handles_.insert(std::make_shared<ResultObject>(std::move(data), amx));
       if (handle) owners_[amx].insert(handle);
       return handle;
@@ -526,6 +550,7 @@ class ConnectionManager {
     Handle batch_handle = 0;
     std::shared_ptr<BatchResultObject> batch;
     try {
+      active_results_.try_emplace(amx, 0);
       batch = std::make_shared<BatchResultObject>(amx);
       result_handles.reserve(data.items.size());
       batch->items.reserve(data.items.size());
@@ -589,6 +614,19 @@ class ConnectionManager {
     return true;
   }
 
+  Handle active_result(void* amx) const {
+    const auto slot = active_results_.find(amx);
+    return slot == active_results_.end() ? 0 : slot->second;
+  }
+
+  bool activate_result(void* amx, Handle handle) {
+    if (handle && !result(amx, handle)) return false;
+    if (!amx || life_.context(amx).expired()) return false;
+    try { active_results_[amx] = handle; }
+    catch (...) { return false; }
+    return true;
+  }
+
   Handle create_json(void* amx, bool retained) {
     if (!amx || life_.context(amx).expired()) return 0;
     Handle handle = 0;
@@ -629,7 +667,9 @@ class ConnectionManager {
 
   std::shared_ptr<ResultObject> result(void* amx, Handle handle) {
     auto value = get_result(handle);
-    return value && value->owner == amx ? value : nullptr;
+    if (value && value->owner == amx) return value;
+    if (value) warnings_("[Pawn.DB Warning] Foreign PDBResult handle.");
+    return nullptr;
   }
 
   bool free_result(void* amx, Handle handle) {
@@ -670,7 +710,10 @@ class ConnectionManager {
 
   void detach(void* amx) {
     auto it = owners_.find(amx);
-    if (it == owners_.end()) return;
+    if (it == owners_.end()) {
+      active_results_.erase(amx);
+      return;
+    }
     std::vector<Handle> pending(it->second.begin(), it->second.end());
     for (auto handle : pending) {
       if (!owners_[amx].contains(handle)) continue;
@@ -684,6 +727,7 @@ class ConnectionManager {
     }
     owners_.erase(it);
     pending_json_.erase(amx);
+    active_results_.erase(amx);
   }
 
  private:
@@ -695,6 +739,7 @@ class ConnectionManager {
   std::unordered_map<void*, std::unordered_set<Handle>> owners_;
   JsonScope* json_scope_ = nullptr;
   std::unordered_map<void*, std::vector<Handle>> pending_json_;
+  std::unordered_map<void*, Handle> active_results_;
 
   bool erase_json(void* amx, Handle handle) {
     if (!handles_.erase<JsonObject>(handle)) return false;
@@ -718,6 +763,8 @@ class ConnectionManager {
 
   bool erase_result(void* amx, Handle handle) {
     if (!handles_.erase<ResultObject>(handle)) return false;
+    if (auto slot = active_results_.find(amx); slot != active_results_.end() && slot->second == handle)
+      slot->second = 0;
     if (auto owner = owners_.find(amx); owner != owners_.end()) {
       owner->second.erase(handle);
     }

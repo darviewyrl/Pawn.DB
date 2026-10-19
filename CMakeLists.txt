@@ -276,3 +276,39 @@ if(WIN32)
     add_test(NAME samp_lifecycle_check COMMAND pawndb_samp_lifecycle_check $<TARGET_FILE:pawndb_samp>)
   endif()
 endif()
+
+add_executable(pawndb_compatibility_check tests/compatibility_check.cpp
+  third_party/omp-pawn-compiler/source/amx/amx.c)
+target_include_directories(pawndb_compatibility_check PRIVATE
+  include third_party/omp-pawn-compiler/source third_party/omp-pawn-compiler/source/linux)
+target_compile_definitions(pawndb_compatibility_check PRIVATE
+  HAVE_STDINT_H=1 PAWN_CELL_SIZE=32 PAWNDB_OMP=1 AMX_NODYNALOAD=1 _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(pawndb_compatibility_check PRIVATE
+  pawndb_argon2 OpenSSL::Crypto nlohmann_json::nlohmann_json Threads::Threads)
+add_test(NAME compatibility_check COMMAND pawndb_compatibility_check)
+find_program(PAWNDB_PAWN_LEGACY_COMPILER NAMES pawncc
+  HINTS "${PROJECT_SOURCE_DIR}/build/tools/legacy-samp" NO_DEFAULT_PATH)
+find_program(PAWNDB_PAWN_MODERN_COMPILER NAMES pawncc
+  HINTS "${PROJECT_SOURCE_DIR}/build/pawncc-modern32" NO_DEFAULT_PATH)
+set(pawn_fixtures)
+foreach(version IN ITEMS LEGACY MODERN)
+  if(PAWNDB_PAWN_${version}_COMPILER)
+    foreach(fixture IN ITEMS compatibility_include_check json_spatial_include_check json_include_check)
+      set(bytecode "${PROJECT_BINARY_DIR}/${fixture}_${version}.amx")
+      add_custom_command(OUTPUT "${bytecode}"
+        COMMAND "${PAWNDB_PAWN_${version}_COMPILER}"
+          "${PROJECT_SOURCE_DIR}/tests/${fixture}.pwn" "-i${PROJECT_SOURCE_DIR}/include" "-o${bytecode}"
+        DEPENDS "tests/${fixture}.pwn" include/pawndb.inc VERBATIM)
+      list(APPEND pawn_fixtures "${bytecode}")
+    endforeach()
+    add_test(NAME compatibility_vm_${version} COMMAND pawndb_compatibility_check
+      "${PROJECT_BINARY_DIR}/compatibility_include_check_${version}.amx")
+    add_test(NAME json_spatial_vm_${version} COMMAND pawndb_json_spatial_format_check
+      "${PROJECT_BINARY_DIR}/json_spatial_include_check_${version}.amx")
+    add_test(NAME compatibility_guards_${version} COMMAND "${CMAKE_COMMAND}"
+      "-DCOMPILER=${PAWNDB_PAWN_${version}_COMPILER}" "-DROOT=${PROJECT_SOURCE_DIR}"
+      "-DOUTPUT=${PROJECT_BINARY_DIR}/guards_${version}" -P "${PROJECT_SOURCE_DIR}/ci/check-pawn-guards.cmake")
+  endif()
+endforeach()
+add_custom_target(pawndb_pawn_fixtures DEPENDS ${pawn_fixtures})
+add_dependencies(pawndb_compatibility_check pawndb_pawn_fixtures)

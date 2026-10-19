@@ -31,7 +31,7 @@ int main() {
       [](std::string) {}, [](const auto&, auto&) { return std::make_shared<Pool>(); });
   std::unordered_map<cell, std::string> strings = {
       {100, "SELECT %d"}, {101, "bad"}, {102, "SELECT after"},
-      {200, ""}, {201, ""}, {202, "OnBatchComplete"}, {203, ""}};
+      {200, ""}, {201, "d"}, {202, "OnBatchComplete"}, {203, ""}};
   std::unordered_map<cell, std::string> outputs;
   const auto* table = pawndb::ConnectionNatives::table();
   auto native = [table](const char* name) {
@@ -74,16 +74,18 @@ int main() {
         return true;
       },
       [&](AMX*, std::string_view name, const auto& args) {
-        if (name != "OnBatchComplete" || args.size() != 2) return;
+        if (name != "OnBatchComplete" || args.size() != 3 || std::get<cell>(args[2]) != 7) return;
         callback_connection = std::get<cell>(args[0]);
         callback_result = std::get<cell>(args[1]);
+        if (call("pdb_num_rows", {}) != 1) return;
         const auto size = call("pdb_batch_size", {callback_result});
         if (retain_in_callback) {
           const auto first_status = call("pdb_batch_status", {callback_result, 0});
           const auto error_status = call("pdb_batch_status", {callback_result, 1});
           const auto last_status = call("pdb_batch_status", {callback_result, 2});
           const auto child = call("pdb_batch_get_result", {callback_result, 0});
-          const auto rows = call("pdb_num_rows", {child});
+          if (!call("pdb_activate_result", {child})) return;
+          const auto rows = call("pdb_num_rows", {});
           const auto error = call("pdb_batch_get_error", {callback_result, 1, 300, 64});
           callback_ok = size == 3 && first_status == 0 && error_status == 1 &&
               last_status == 0 && child > 0 && rows == 1 && error &&
@@ -107,7 +109,7 @@ int main() {
   const auto batch = call("pdb_batch_create", {static_cast<cell>(connection), 0});
   if (batch <= 0 || !call("pdb_batch_add", {batch, 100, 0}) ||
       !call("pdb_batch_add", {batch, 101}) || !call("pdb_batch_add", {batch, 102})) return 3;
-  if (!call("pdb_batch_execute", {batch, 200, 201})) return 4;
+  if (!call("pdb_batch_execute", {batch, 200, 201, 0})) return 4;
   const auto deadline = std::chrono::steady_clock::now() + 3s;
   while (!callback_result && std::chrono::steady_clock::now() < deadline) {
     life.dispatch_tick();
@@ -115,6 +117,8 @@ int main() {
   }
   if (!callback_result || callback_connection != static_cast<cell>(connection) || !callback_ok ||
       !manager.batch_result(&amx, static_cast<std::uint32_t>(callback_result))) return 5;
+  if (manager.active_result(&amx) ||
+      !manager.result(&amx, static_cast<std::uint32_t>(call("pdb_batch_get_result", {callback_result, 0})))) return 6;
   if (!call("pdb_free_batch_result", {callback_result}) ||
       manager.batch_result(&amx, static_cast<std::uint32_t>(callback_result))) return 6;
 
@@ -123,7 +127,7 @@ int main() {
   retain_in_callback = false;
   const auto scoped_batch = call("pdb_batch_create", {static_cast<cell>(connection), 0});
   if (scoped_batch <= 0 || !call("pdb_batch_add", {scoped_batch, 102}) ||
-      !call("pdb_batch_execute", {scoped_batch, 200, 201})) return 7;
+      !call("pdb_batch_execute", {scoped_batch, 200, 201, 0})) return 7;
   const auto scoped_deadline = std::chrono::steady_clock::now() + 3s;
   while (!callback_result && std::chrono::steady_clock::now() < scoped_deadline) {
     life.dispatch_tick();

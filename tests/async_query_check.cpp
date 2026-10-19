@@ -106,10 +106,9 @@ int main() {
       }, [&](AMX*, std::string_view name, const auto& args) {
         callback_thread = std::this_thread::get_id();
         callbacks.emplace_back(name, args);
-        if (name == "OnLoaded" && args.size() == 2) {
-          retained_result = static_cast<std::uint32_t>(std::get<cell>(args[0]));
-          const cell retain[] = {sizeof(cell), static_cast<cell>(retained_result)};
-          if (!native("pdb_retain_result")(&amx, retain)) retained_result = 0;
+        if (name == "OnLoaded" && args.size() == 1) {
+          const cell retain[] = {0};
+          retained_result = static_cast<std::uint32_t>(native("pdb_retain_result")(&amx, retain));
         }
       });
 
@@ -147,9 +146,8 @@ int main() {
   }
   life.dispatch_tick();
   if (callbacks.size() != 2 || callbacks[1].first != "OnLoaded" ||
-      callbacks[1].second.size() != 2 || !retained_result ||
-      std::get<cell>(callbacks[1].second[0]) != static_cast<cell>(retained_result) ||
-      std::get<cell>(callbacks[1].second[1]) != 42 ||
+      callbacks[1].second.size() != 1 || !retained_result ||
+      std::get<cell>(callbacks[1].second[0]) != 42 ||
       callback_thread != main_thread) {
     std::cerr << "success callback: count=" << callbacks.size()
               << " name=" << (callbacks.size() < 2 ? "" : callbacks[1].first)

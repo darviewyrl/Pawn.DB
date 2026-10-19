@@ -178,3 +178,6 @@ jobs:
           & cl @common /Ithird_party/json/include /Ithird_party/omp-pawn-compiler/source /Ithird_party/omp-pawn-compiler/source/linux /DHAVE_STDINT_H=1 /DPAWN_CELL_SIZE=32 /DPAWNDB_OMP=1 tests/result_extensions_check.cpp /Fe:result_extensions_asan.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\result_extensions_asan.exe
+          cmake -S . -B build/compat-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo '-DCMAKE_C_FLAGS=/fsanitize=address' '-DCMAKE_CXX_FLAGS=/fsanitize=address /EHsc' "-DOPENSSL_ROOT_DIR=$PWD/build/deps/openssl" "-DLIB_EAY_RELEASE=$PWD/build/deps/openssl/lib/libcrypto.lib" "-DSSL_EAY_RELEASE=$PWD/build/deps/openssl/lib/libssl.lib" "-DPAWNDB_LIBPQ_STATIC_LIBRARY=$PWD/build/deps/postgres-build/src/interfaces/libpq/libpq.a" "-DPAWNDB_LIBPQ_INCLUDE_DIR=$PWD/build/deps/postgres-source/src/interfaces/libpq" "-DPAWNDB_LIBPQ_COMMON_INCLUDE_DIR=$PWD/build/deps/postgres-source/src/include" "-DPAWNDB_LIBPQ_EXTRA_LIBRARIES=$PWD/build/deps/postgres-build/src/common/libpgcommon_shlib.a;$PWD/build/deps/postgres-build/src/port/libpgport.a;ws2_32;secur32;crypt32"
+          cmake --build build/compat-asan --target pawndb_compatibility_check pawndb_json_spatial_format_check --parallel 2
+          ctest --test-dir build/compat-asan --output-on-failure -R '^(compatibility_|json_spatial_vm)'

@@ -14,3 +14,11 @@ g++ -std=c++20 "${flags[@]}" -pie -Iinclude -Ithird_party/json/include \
   -DPAWN_CELL_SIZE=32 -DPAWNDB_OMP=1 tests/crypto_check.cpp "$output/"*.o \
   -lcrypto -o "$output/crypto_check"
 "$output/crypto_check"
+
+gcc -std=c99 "${flags[@]}" -DAMX_NODYNALOAD=1 -DHAVE_STDINT_H=1 -DHAVE_ENDIAN_H=1 -DPAWN_CELL_SIZE=32 \
+  -Ithird_party/omp-pawn-compiler/source/linux -c third_party/omp-pawn-compiler/source/amx/amx.c -o "$output/amx.o"
+g++ -std=c++20 "${flags[@]}" -pie -Iinclude -Ithird_party/json/include -Ithird_party/argon2/include \
+  -Ithird_party/omp-pawn-compiler/source -Ithird_party/omp-pawn-compiler/source/linux \
+  -DHAVE_STDINT_H=1 -DHAVE_ENDIAN_H=1 -DPAWN_CELL_SIZE=32 -DPAWNDB_OMP=1 \
+  tests/compatibility_check.cpp "$output/"*.o -lcrypto -o "$output/compatibility_check"
+"$output/compatibility_check"
