@@ -5,11 +5,8 @@
 
 Pawn.DB is a C++20 asynchronous database plugin for Pawn servers. It supports MariaDB/MySQL and PostgreSQL and provides separate adapters for open.mp and legacy SA-MP.
 
-- Documentation site source: [Mintlify docs repository](https://github.com/darviewyrl/pawndb.docs)
-- Migration guide: [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md)
+- Documentation: [Pawn.DB Documentation](https://pawndb.mintlify.site/)
 - Releases: [GitHub Releases](https://github.com/darviewyrl/Pawn.DB/releases)
-
-> The Mintlify project has no verified public site URL in the repository yet. Use the docs repository link until its deployment domain is confirmed.
 
 ## Technical highlights
 
@@ -82,8 +79,8 @@ Windows, from Visual Studio 2022 Developer PowerShell with Perl, Ninja, NASM, Me
 .\ci\build-windows.ps1 -Arch x64 -Adapter omp
 ```
 
-Select `x86` for 32-bit; use `-Adapter samp` only with x86. Linux x86 builds require multilib compiler and system development libraries. The scripts use `build/ci`, so clean that directory before switching architecture. See [full source-build notes](https://github.com/darviewyrl/pawndb.docs/blob/main/guides/building-from-source.mdx).
+Select `x86` for 32-bit; use `-Adapter samp` only with x86. Linux x86 builds require multilib compiler and system development libraries. The scripts use `build/ci`, so clean that directory before switching architecture. See [full source-build notes](https://pawndb.mintlify.site/guides/building-from-source).
 
 ## Compatibility
 
-Selected pBlueG R41-4 and omp-mysql APIs can be enabled with `#define PAWNDB_COMPAT` before `<pawndb>`. This is a source migration aid, not a full behavioral replacement. Deprecated synchronous, ORM, and legacy bcrypt APIs compile as warnings and return fallback values without doing work. Review the [migration guide](MIGRATION_GUIDE.md).
+Selected pBlueG R41-4 and omp-mysql APIs can be enabled with `#define PAWNDB_COMPAT` before `<pawndb>`. This is a source migration aid, not a full behavioral replacement. Deprecated synchronous, ORM, and legacy bcrypt APIs compile as warnings and return fallback values without doing work. Review the [Mintlify migration guide](https://pawndb.mintlify.site/migration/legacy-mysql).
